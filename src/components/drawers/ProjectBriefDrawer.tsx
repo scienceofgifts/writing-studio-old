@@ -47,7 +47,7 @@ export const ProjectBriefDrawer: React.FC<ProjectBriefDrawerProps> = ({
   const handleRemoveKeyPoint = (index: number) => {
     onChange({
       ...brief,
-      keyPoints: brief.keyPoints.filter((_, i) => i !== index),
+      keyPoints: (brief.keyPoints || []).filter((_, i) => i !== index),
     });
   };
 
@@ -64,7 +64,7 @@ export const ProjectBriefDrawer: React.FC<ProjectBriefDrawerProps> = ({
   const handleRemoveAvoidItem = (index: number) => {
     onChange({
       ...brief,
-      thingsToAvoid: brief.thingsToAvoid.filter((_, i) => i !== index),
+      thingsToAvoid: (brief.thingsToAvoid || []).filter((_, i) => i !== index),
     });
   };
 

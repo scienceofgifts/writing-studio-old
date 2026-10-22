@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import {
   X,
   Copy,
@@ -57,7 +57,7 @@ export const DraftPackageDrawer: React.FC<DraftPackageDrawerProps> = ({
   // Customization controls
   const [modelTarget, setModelTarget] = useState<'chatgpt' | 'claude' | 'generic'>('chatgpt');
   const [targetWordCount, setTargetWordCount] = useState<number>(
-    parseInt(project.writingControls?.wordCountTarget || '', 10) || (project.outlineStructure === 'essay' ? 1800 : 1500)
+    parseInt((project.writingControls?.wordCountTarget || '').replace(/,/g, ''), 10) || (project.outlineStructure === 'essay' ? 1800 : 1500)
   );
   const [includeStyleCharacteristics, setIncludeStyleCharacteristics] = useState(true);
   const [includeResearchLimitations, setIncludeResearchLimitations] = useState(true);
@@ -69,10 +69,22 @@ export const DraftPackageDrawer: React.FC<DraftPackageDrawerProps> = ({
   // Progressive section selector
   const [selectedSectionIdx, setSelectedSectionIdx] = useState<number>(0);
 
-  // Copy feedback states
+  // Copy feedback states & timeout refs
   const [copiedMasterPrompt, setCopiedMasterPrompt] = useState(false);
   const [copiedMarkdown, setCopiedMarkdown] = useState(false);
   const [copiedSectionPrompt, setCopiedSectionPrompt] = useState(false);
+
+  const copyMasterTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const copyMarkdownTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const copySectionTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (copyMasterTimeoutRef.current) clearTimeout(copyMasterTimeoutRef.current);
+      if (copyMarkdownTimeoutRef.current) clearTimeout(copyMarkdownTimeoutRef.current);
+      if (copySectionTimeoutRef.current) clearTimeout(copySectionTimeoutRef.current);
+    };
+  }, []);
 
   // Build draft package dynamically
   const draftPackage: EditorialDraftPackage = useMemo(() => {
@@ -114,7 +126,8 @@ export const DraftPackageDrawer: React.FC<DraftPackageDrawerProps> = ({
         'ChatGPT Prompt Copied',
         `Full editorial handoff package (${promptWordCount.toLocaleString()} words) ready to paste.`
       );
-      setTimeout(() => setCopiedMasterPrompt(false), 2500);
+      if (copyMasterTimeoutRef.current) clearTimeout(copyMasterTimeoutRef.current);
+      copyMasterTimeoutRef.current = setTimeout(() => setCopiedMasterPrompt(false), 2500);
 
       // Record snapshot in project if needed
       if (project.editorialDevelopment && project.editorialDevelopment.status !== 'draft_package_ready') {
@@ -144,7 +157,8 @@ export const DraftPackageDrawer: React.FC<DraftPackageDrawerProps> = ({
       await navigator.clipboard.writeText(draftPackage.markdownExport);
       setCopiedMarkdown(true);
       toast.success('Markdown Copied', 'Editorial package document copied to clipboard.');
-      setTimeout(() => setCopiedMarkdown(false), 2500);
+      if (copyMarkdownTimeoutRef.current) clearTimeout(copyMarkdownTimeoutRef.current);
+      copyMarkdownTimeoutRef.current = setTimeout(() => setCopiedMarkdown(false), 2500);
     } catch (e) {
       toast.error('Copy Failed', 'Unable to access clipboard.');
     }
@@ -178,7 +192,8 @@ export const DraftPackageDrawer: React.FC<DraftPackageDrawerProps> = ({
         `Step ${selectedSectionIdx + 1} Prompt Copied`,
         `Ready to paste into ChatGPT for focused drafting.`
       );
-      setTimeout(() => setCopiedSectionPrompt(false), 2500);
+      if (copySectionTimeoutRef.current) clearTimeout(copySectionTimeoutRef.current);
+      copySectionTimeoutRef.current = setTimeout(() => setCopiedSectionPrompt(false), 2500);
     } catch (e) {
       toast.error('Copy Failed', 'Unable to access clipboard.');
     }
