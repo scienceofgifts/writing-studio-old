@@ -72,7 +72,18 @@ export default function App() {
     const unsubscribe = storage.subscribe(() => {
       setProjects(storage.getProjects());
     });
-    return unsubscribe;
+
+    const handleCrossTabStorage = (e: StorageEvent) => {
+      if (e.key === 'sog_writing_projects_v2' && e.newValue) {
+        setProjects(storage.getProjects());
+      }
+    };
+    window.addEventListener('storage', handleCrossTabStorage);
+
+    return () => {
+      unsubscribe();
+      window.removeEventListener('storage', handleCrossTabStorage);
+    };
   }, []);
 
   // Single source of truth for mutually exclusive writing panels
@@ -136,7 +147,7 @@ export default function App() {
     autosaveTimeoutRef.current = setTimeout(() => {
       setSaveStatus('saving');
       try {
-        storage.saveProject(updatedProject);
+        storage.saveProject(updatedProject, { isAutosave: true, silent: true });
         setTimeout(() => {
           setSaveStatus('saved');
         }, 250);
@@ -417,6 +428,15 @@ export default function App() {
       newContent = `${activeProject.content}\n${ensureSemanticHtml(proposal.proposedText)}`;
     }
 
+    if (editorRef.current) {
+      editorRef.current.commands.setContent(newContent, { emitUpdate: false });
+    }
+    window.dispatchEvent(
+      new CustomEvent('sog:restore-editor-content', {
+        detail: { content: newContent, projectId: activeProject.id },
+      })
+    );
+
     handleUpdateActiveProject({
       ...activeProject,
       content: newContent,
@@ -469,6 +489,15 @@ export default function App() {
 
     const updatedOpportunities = (activeProject.linkOpportunities || []).map((o) =>
       o.id === opp.id ? { ...o, status: 'accepted' as const } : o
+    );
+
+    if (editorRef.current) {
+      editorRef.current.commands.setContent(res.updatedHtml, { emitUpdate: false });
+    }
+    window.dispatchEvent(
+      new CustomEvent('sog:restore-editor-content', {
+        detail: { content: res.updatedHtml, projectId: activeProject.id },
+      })
     );
 
     handleUpdateActiveProject({
@@ -526,6 +555,15 @@ export default function App() {
 
     const updatedOpportunities = (activeProject.linkOpportunities || []).map((o) =>
       insertedIds.includes(o.id) ? { ...o, status: 'accepted' as const } : o
+    );
+
+    if (editorRef.current) {
+      editorRef.current.commands.setContent(currentHtml, { emitUpdate: false });
+    }
+    window.dispatchEvent(
+      new CustomEvent('sog:restore-editor-content', {
+        detail: { content: currentHtml, projectId: activeProject.id },
+      })
     );
 
     handleUpdateActiveProject({
@@ -614,6 +652,15 @@ export default function App() {
           mode: 'full',
         };
 
+    if (editorRef.current) {
+      editorRef.current.commands.setContent(newContent, { emitUpdate: false });
+    }
+    window.dispatchEvent(
+      new CustomEvent('sog:restore-editor-content', {
+        detail: { content: newContent, projectId: activeProject.id },
+      })
+    );
+
     handleUpdateActiveProject({
       ...activeProject,
       content: newContent,
@@ -643,6 +690,15 @@ export default function App() {
         pendingFindings.some((p) => p.id === f.id) ? { ...f, status: 'accepted' as const } : f
       ),
     };
+
+    if (editorRef.current) {
+      editorRef.current.commands.setContent(currentHtml, { emitUpdate: false });
+    }
+    window.dispatchEvent(
+      new CustomEvent('sog:restore-editor-content', {
+        detail: { content: currentHtml, projectId: activeProject.id },
+      })
+    );
 
     handleUpdateActiveProject({
       ...activeProject,
@@ -732,6 +788,15 @@ export default function App() {
           findings: [finding],
           categoryChecks: [],
         };
+
+    if (editorRef.current) {
+      editorRef.current.commands.setContent(newContent, { emitUpdate: false });
+    }
+    window.dispatchEvent(
+      new CustomEvent('sog:restore-editor-content', {
+        detail: { content: newContent, projectId: activeProject.id },
+      })
+    );
 
     handleUpdateActiveProject({
       ...activeProject,

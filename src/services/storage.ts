@@ -45,6 +45,23 @@ const STORAGE_KEY_RESEARCH_STUDIES = 'sog_research_studies_v1';
 const STORAGE_KEY_RESEARCH_CLAIMS = 'sog_research_claims_v1';
 const STORAGE_KEY_RESEARCH_FILES = 'sog_research_files_v1';
 const STORAGE_KEY_LAST_BACKUP = 'sog_last_backup_timestamp_v1';
+const STORAGE_KEY_SEEDS_INITIALIZED = 'sog_seeds_initialized_v1';
+
+export function areSeedsInitialized(): boolean {
+  try {
+    return localStorage.getItem(STORAGE_KEY_SEEDS_INITIALIZED) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+export function markSeedsInitialized(): void {
+  try {
+    localStorage.setItem(STORAGE_KEY_SEEDS_INITIALIZED, 'true');
+  } catch (e) {
+    console.warn('Failed to mark seeds initialized:', e);
+  }
+}
 
 const storageListeners = new Set<() => void>();
 
@@ -62,6 +79,26 @@ function mergeWithTombstones<T extends { id: string; updatedAt?: string; deleted
     if (!local) {
       mergedMap.set(remote.id, remote);
     } else {
+      // Local deletion wins unless remote updatedAt is strictly newer than local deletedAt
+      if (local._isDeleted) {
+        const localDeletedTime = new Date(local.deletedAt || local.updatedAt || 0).getTime();
+        const remoteUpdatedTime = new Date(remote.updatedAt || 0).getTime();
+        if (remoteUpdatedTime <= localDeletedTime) {
+          mergedMap.set(remote.id, local);
+          return;
+        }
+      }
+
+      // Remote deletion wins unless local updatedAt is strictly newer than remote deletedAt
+      if (remote._isDeleted) {
+        const remoteDeletedTime = new Date(remote.deletedAt || remote.updatedAt || 0).getTime();
+        const localUpdatedTime = new Date(local.updatedAt || 0).getTime();
+        if (localUpdatedTime <= remoteDeletedTime) {
+          mergedMap.set(remote.id, remote);
+          return;
+        }
+      }
+
       const localTime = new Date(local.updatedAt || (local as any).deletedAt || 0).getTime();
       const remoteTime = new Date(remote.updatedAt || (remote as any).deletedAt || 0).getTime();
 
@@ -626,112 +663,124 @@ const SEED_PROJECTS: WritingProject[] = [
 
 export const storage = {
   getRawProjectsIncludingDeleted(): WritingProject[] {
+    const initialized = areSeedsInitialized();
     try {
       const stored = localStorage.getItem(STORAGE_KEY_PROJECTS);
-      if (stored) {
+      if (stored !== null) {
         const parsed: WritingProject[] = JSON.parse(stored);
-        const mapped: WritingProject[] = parsed.map((p): WritingProject => {
-          const controls = p.writingControls || p.aiSettings || { ...DEFAULT_WRITING_CONTROLS };
-          const normalizedControls: WritingControls = {
-            ...DEFAULT_WRITING_CONTROLS,
-            ...controls,
-          };
-          let giftGuideMeta = p.giftGuideMeta;
-          if (p.type === 'gift_guide') {
-            giftGuideMeta = {
-              ...DEFAULT_GIFT_GUIDE_METADATA,
-              ...(p.giftGuideMeta || {}),
-              settings: {
-                ...DEFAULT_GUIDE_SETTINGS,
-                ...(p.giftGuideMeta?.settings || {}),
-              },
-              products: p.giftGuideMeta?.products || [],
-              faqList: p.giftGuideMeta?.faqList || [],
+        if (Array.isArray(parsed)) {
+          const mapped: WritingProject[] = parsed.map((p): WritingProject => {
+            const controls = p.writingControls || p.aiSettings || { ...DEFAULT_WRITING_CONTROLS };
+            const normalizedControls: WritingControls = {
+              ...DEFAULT_WRITING_CONTROLS,
+              ...controls,
             };
-          }
+            let giftGuideMeta = p.giftGuideMeta;
+            if (p.type === 'gift_guide') {
+              giftGuideMeta = {
+                ...DEFAULT_GIFT_GUIDE_METADATA,
+                ...(p.giftGuideMeta || {}),
+                settings: {
+                  ...DEFAULT_GUIDE_SETTINGS,
+                  ...(p.giftGuideMeta?.settings || {}),
+                },
+                products: p.giftGuideMeta?.products || [],
+                faqList: p.giftGuideMeta?.faqList || [],
+              };
+            }
 
-          let articleMeta = p.articleMeta;
-          if (p.type === 'article') {
-            const seed = SEED_PROJECTS.find((s) => s.id === p.id);
-            const defaultSlug = (p.title || 'untitled-article')
-              .toLowerCase()
-              .replace(/[^a-z0-9]+/g, '-')
-              .replace(/(^-|-$)/g, '');
-            articleMeta = {
-              slug: defaultSlug,
-              seoTitle: p.title ? `${p.title} | Science of Gifts` : '',
-              metaDescription: '',
-              standfirst: '',
-              category: 'Product & Craft Advice',
-              author: {
-                name: 'Science of Gifts Editorial',
-                role: 'Staff Writer',
+            let articleMeta = p.articleMeta;
+            if (p.type === 'article') {
+              const seed = SEED_PROJECTS.find((s) => s.id === p.id);
+              const defaultSlug = (p.title || 'untitled-article')
+                .toLowerCase()
+                .replace(/[^a-z0-9]+/g, '-')
+                .replace(/(^-|-$)/g, '');
+              articleMeta = {
+                slug: defaultSlug,
+                seoTitle: p.title ? `${p.title} | Science of Gifts` : '',
+                metaDescription: '',
+                standfirst: '',
+                category: 'Product & Craft Advice',
+                author: {
+                  name: 'Science of Gifts Editorial',
+                  role: 'Staff Writer',
+                },
+                targetKeyword: '',
+                secondaryKeywords: [],
+                audience: p.brief?.audience || 'Thoughtful gifters & readers',
+                searchIntent: 'Editorial insight & advice',
+                tags: [],
+                sources: [],
+                relatedContent: [],
+                ...(seed?.articleMeta || {}),
+                ...(p.articleMeta || {}),
+              };
+            }
+
+            return {
+              ...p,
+              content: ensureSemanticHtml(p.content),
+              writingControls: normalizedControls,
+              aiSettings: normalizedControls,
+              brief: {
+                ...DEFAULT_BRIEF,
+                ...(p.brief || {}),
               },
-              targetKeyword: '',
-              secondaryKeywords: [],
-              audience: p.brief?.audience || 'Thoughtful gifters & readers',
-              searchIntent: 'Editorial insight & advice',
-              tags: [],
-              sources: [],
-              relatedContent: [],
-              ...(seed?.articleMeta || {}),
-              ...(p.articleMeta || {}),
+              outline: p.outline || [],
+              contentRules: p.contentRules || [...DEFAULT_CONTENT_RULES],
+              projectInstructions: p.projectInstructions || '',
+              giftGuideMeta,
+              articleMeta,
             };
+          });
+
+          // Only seed if seeds have never been initialized before
+          if (!initialized) {
+            markSeedsInitialized();
+            const existingIds = new Set(mapped.map((p) => p.id));
+            let added = false;
+            for (const seed of SEED_PROJECTS) {
+              if (!existingIds.has(seed.id)) {
+                mapped.push({
+                  ...seed,
+                  writingControls: { ...DEFAULT_WRITING_CONTROLS, ...seed.aiSettings },
+                  aiSettings: { ...DEFAULT_WRITING_CONTROLS, ...seed.aiSettings },
+                } as WritingProject);
+                added = true;
+              }
+            }
+            if (added) {
+              this.saveRawProjects(mapped, { silent: true });
+            }
           }
 
-          return {
-            ...p,
-            content: ensureSemanticHtml(p.content),
-            writingControls: normalizedControls,
-            aiSettings: normalizedControls,
-            brief: {
-              ...DEFAULT_BRIEF,
-              ...(p.brief || {}),
-            },
-            outline: p.outline || [],
-            contentRules: p.contentRules || [...DEFAULT_CONTENT_RULES],
-            projectInstructions: p.projectInstructions || '',
-            giftGuideMeta,
-            articleMeta,
-          };
-        });
-
-        // Ensure new seed projects (e.g. teacher appreciation and viking articles) are available
-        const existingIds = new Set(mapped.map((p) => p.id));
-        let added = false;
-        for (const seed of SEED_PROJECTS) {
-          if (!existingIds.has(seed.id)) {
-            mapped.push({
-              ...seed,
-              writingControls: { ...DEFAULT_WRITING_CONTROLS, ...seed.aiSettings },
-              aiSettings: { ...DEFAULT_WRITING_CONTROLS, ...seed.aiSettings },
-            } as WritingProject);
-            added = true;
-          }
+          return mapped;
         }
-        if (added) {
-          this.saveRawProjects(mapped);
-        }
-
-        return mapped;
       }
     } catch (e) {
       console.warn('Failed to read projects from localStorage:', e);
     }
-    const seeded: WritingProject[] = SEED_PROJECTS.map((p) => ({
-      ...p,
-      writingControls: { ...DEFAULT_WRITING_CONTROLS, ...p.aiSettings },
-      aiSettings: { ...DEFAULT_WRITING_CONTROLS, ...p.aiSettings },
-    }) as WritingProject);
-    this.saveRawProjects(seeded);
-    return seeded;
+
+    if (!initialized) {
+      markSeedsInitialized();
+      const seeded: WritingProject[] = SEED_PROJECTS.map((p) => ({
+        ...p,
+        writingControls: { ...DEFAULT_WRITING_CONTROLS, ...p.aiSettings },
+        aiSettings: { ...DEFAULT_WRITING_CONTROLS, ...p.aiSettings },
+      }) as WritingProject);
+      this.saveRawProjects(seeded, { silent: true });
+      return seeded;
+    }
+
+    return [];
   },
 
   getProjects(): WritingProject[] {
     return this.getRawProjectsIncludingDeleted().filter((p) => !p._isDeleted);
   },
 
-  saveRawProjects(projects: WritingProject[]): void {
+  saveRawProjects(projects: WritingProject[], options?: { silent?: boolean }): void {
     try {
       localStorage.setItem(STORAGE_KEY_PROJECTS, JSON.stringify(projects));
     } catch (e) {
@@ -740,7 +789,9 @@ export const storage = {
     indexedDBService.putMany(STORES.PROJECTS, projects).catch((err) => {
       console.warn('Async IndexedDB saveRawProjects error:', err);
     });
-    this.notifyListeners();
+    if (!options?.silent) {
+      this.notifyListeners();
+    }
   },
 
   saveProjects(projects: WritingProject[]): void {
@@ -769,7 +820,7 @@ export const storage = {
     return list.find((p) => p.id === id);
   },
 
-  saveProject(project: WritingProject): void {
+  saveProject(project: WritingProject, options?: { isAutosave?: boolean; silent?: boolean }): void {
     const list = this.getRawProjectsIncludingDeleted();
     const index = list.findIndex((p) => p.id === project.id);
     const controls = project.writingControls || project.aiSettings || { ...DEFAULT_WRITING_CONTROLS };
@@ -786,7 +837,8 @@ export const storage = {
     } else {
       list.unshift(updated);
     }
-    this.saveRawProjects(list);
+    const silent = options?.silent ?? options?.isAutosave ?? false;
+    this.saveRawProjects(list, { silent });
   },
 
   renameProject(id: string, newTitle: string): WritingProject | undefined {
@@ -1164,20 +1216,25 @@ export const storage = {
   // STYLE REFERENCE PROFILES (Phase 3)
   // ==========================================
   getRawStyleProfilesIncludingDeleted(): StyleProfile[] {
+    const initialized = areSeedsInitialized();
     try {
       const stored = localStorage.getItem(STORAGE_KEY_STYLE_PROFILES);
-      if (stored) {
+      if (stored !== null) {
         const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed) && parsed.length > 0) {
+        if (Array.isArray(parsed)) {
           return parsed;
         }
       }
     } catch (e) {
       console.warn('Failed to read style profiles from localStorage:', e);
     }
-    const seed = DEFAULT_SEED_STYLE_PROFILES;
-    this.saveRawStyleProfiles(seed);
-    return seed;
+    if (!initialized) {
+      markSeedsInitialized();
+      const seed = DEFAULT_SEED_STYLE_PROFILES;
+      this.saveRawStyleProfiles(seed, { silent: true });
+      return seed;
+    }
+    return [];
   },
 
   getStyleProfiles(): StyleProfile[] {
@@ -1189,7 +1246,7 @@ export const storage = {
     return list.find((p) => p.id === id) || null;
   },
 
-  saveRawStyleProfiles(profiles: StyleProfile[]): void {
+  saveRawStyleProfiles(profiles: StyleProfile[], options?: { silent?: boolean }): void {
     try {
       localStorage.setItem(STORAGE_KEY_STYLE_PROFILES, JSON.stringify(profiles));
     } catch (e) {
@@ -1198,7 +1255,9 @@ export const storage = {
     indexedDBService.putMany(STORES.STYLE_PROFILES, profiles).catch((err) => {
       console.warn('Async IndexedDB saveRawStyleProfiles error:', err);
     });
-    this.notifyListeners();
+    if (!options?.silent) {
+      this.notifyListeners();
+    }
   },
 
   saveStyleProfile(profile: StyleProfile): void {
@@ -1292,15 +1351,13 @@ export const storage = {
   // INTERNAL LINK LIBRARY (Phase 4)
   // ==========================================
   getRawInternalLinksIncludingDeleted(): InternalLink[] {
+    const initialized = areSeedsInitialized();
     try {
       const stored = localStorage.getItem(STORAGE_KEY_INTERNAL_LINKS);
-      if (stored) {
+      if (stored !== null) {
         const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          const existingIds = new Set(parsed.map((l: any) => l.id));
-          const existingUrls = new Set(parsed.map((l: any) => l.url));
+        if (Array.isArray(parsed)) {
           let changed = false;
-
           const migrated = parsed.map((l: any) => {
             if (!l.destinationType) {
               changed = true;
@@ -1312,16 +1369,21 @@ export const storage = {
             return l;
           });
 
-          // Merge any seed destinations not yet present
-          for (const seed of DEFAULT_SEED_INTERNAL_LINKS) {
-            if (!existingIds.has(seed.id) && !existingUrls.has(seed.url)) {
-              migrated.push(seed);
-              changed = true;
+          // Merge seed destinations only on initial run
+          if (!initialized) {
+            markSeedsInitialized();
+            const existingIds = new Set(parsed.map((l: any) => l.id));
+            const existingUrls = new Set(parsed.map((l: any) => l.url));
+            for (const seed of DEFAULT_SEED_INTERNAL_LINKS) {
+              if (!existingIds.has(seed.id) && !existingUrls.has(seed.url)) {
+                migrated.push(seed);
+                changed = true;
+              }
             }
           }
 
           if (changed) {
-            this.saveRawInternalLinks(migrated);
+            this.saveRawInternalLinks(migrated, { silent: true });
           }
           return migrated;
         }
@@ -1329,9 +1391,14 @@ export const storage = {
     } catch (e) {
       console.warn('Failed to read internal links from localStorage:', e);
     }
-    const seed = DEFAULT_SEED_INTERNAL_LINKS;
-    this.saveRawInternalLinks(seed);
-    return seed;
+
+    if (!initialized) {
+      markSeedsInitialized();
+      const seed = DEFAULT_SEED_INTERNAL_LINKS;
+      this.saveRawInternalLinks(seed, { silent: true });
+      return seed;
+    }
+    return [];
   },
 
   getInternalLinks(): InternalLink[] {
@@ -1343,7 +1410,7 @@ export const storage = {
     return list.find((l) => l.id === id) || null;
   },
 
-  saveRawInternalLinks(links: InternalLink[]): void {
+  saveRawInternalLinks(links: InternalLink[], options?: { silent?: boolean }): void {
     try {
       localStorage.setItem(STORAGE_KEY_INTERNAL_LINKS, JSON.stringify(links));
     } catch (e) {
@@ -1352,7 +1419,9 @@ export const storage = {
     indexedDBService.putMany(STORES.INTERNAL_LINKS, links).catch((err) => {
       console.warn('Async IndexedDB saveRawInternalLinks error:', err);
     });
-    this.notifyListeners();
+    if (!options?.silent) {
+      this.notifyListeners();
+    }
   },
 
   saveInternalLink(link: InternalLink): void {
@@ -1628,22 +1697,26 @@ export const storage = {
   // RESEARCH REPOSITORY (Studies, Claims, Files)
   // ==========================================
   getRawResearchStudiesIncludingDeleted(): ResearchStudy[] {
+    const initialized = areSeedsInitialized();
     let list: ResearchStudy[] = [];
     try {
       const stored = localStorage.getItem(STORAGE_KEY_RESEARCH_STUDIES);
-      if (stored) {
+      if (stored !== null) {
         const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed) && parsed.length > 0) {
+        if (Array.isArray(parsed)) {
           list = parsed;
         }
       }
     } catch (e) {
       console.warn('Failed to read research studies from localStorage:', e);
     }
-    if (list.length === 0) {
+
+    if (list.length === 0 && !initialized) {
+      markSeedsInitialized();
       list = DEFAULT_SEED_RESEARCH_STUDIES;
-      this.saveRawResearchStudies(list);
+      this.saveRawResearchStudies(list, { silent: true });
     }
+
     return list.map((s) => ({
       ...s,
       publication: s.publication || s.sourceOrPublisher || '',
@@ -1667,7 +1740,7 @@ export const storage = {
     return list.find((s) => s.id === id) || null;
   },
 
-  saveRawResearchStudies(studies: ResearchStudy[]): void {
+  saveRawResearchStudies(studies: ResearchStudy[], options?: { silent?: boolean }): void {
     try {
       localStorage.setItem(STORAGE_KEY_RESEARCH_STUDIES, JSON.stringify(studies));
     } catch (e) {
@@ -1676,7 +1749,9 @@ export const storage = {
     indexedDBService.putMany(STORES.RESEARCH_STUDIES, studies).catch((err) => {
       console.warn('Async IndexedDB saveRawResearchStudies error:', err);
     });
-    this.notifyListeners();
+    if (!options?.silent) {
+      this.notifyListeners();
+    }
   },
 
   saveResearchStudies(studies: ResearchStudy[]): void {
@@ -1766,27 +1841,33 @@ export const storage = {
   },
 
   getRawResearchClaimsIncludingDeleted(): ResearchClaim[] {
+    const initialized = areSeedsInitialized();
     try {
       const stored = localStorage.getItem(STORAGE_KEY_RESEARCH_CLAIMS);
-      if (stored) {
+      if (stored !== null) {
         const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed) && parsed.length > 0) {
+        if (Array.isArray(parsed)) {
           return parsed;
         }
       }
     } catch (e) {
       console.warn('Failed to read research claims from localStorage:', e);
     }
-    const seed = DEFAULT_SEED_RESEARCH_CLAIMS;
-    this.saveRawResearchClaims(seed);
-    return seed;
+
+    if (!initialized) {
+      markSeedsInitialized();
+      const seed = DEFAULT_SEED_RESEARCH_CLAIMS;
+      this.saveRawResearchClaims(seed, { silent: true });
+      return seed;
+    }
+    return [];
   },
 
   getResearchClaims(): ResearchClaim[] {
     return this.getRawResearchClaimsIncludingDeleted().filter((c) => !c._isDeleted);
   },
 
-  saveRawResearchClaims(claims: ResearchClaim[]): void {
+  saveRawResearchClaims(claims: ResearchClaim[], options?: { silent?: boolean }): void {
     try {
       localStorage.setItem(STORAGE_KEY_RESEARCH_CLAIMS, JSON.stringify(claims));
     } catch (e) {
@@ -1795,7 +1876,9 @@ export const storage = {
     indexedDBService.putMany(STORES.RESEARCH_CLAIMS, claims).catch((err) => {
       console.warn('Async IndexedDB saveRawResearchClaims error:', err);
     });
-    this.notifyListeners();
+    if (!options?.silent) {
+      this.notifyListeners();
+    }
   },
 
   saveResearchClaims(claims: ResearchClaim[]): void {
@@ -1880,23 +1963,29 @@ export const storage = {
   },
 
   getResearchFiles(): ResearchFile[] {
+    const initialized = areSeedsInitialized();
     try {
       const stored = localStorage.getItem(STORAGE_KEY_RESEARCH_FILES);
-      if (stored) {
+      if (stored !== null) {
         const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed) && parsed.length > 0) {
+        if (Array.isArray(parsed)) {
           return parsed;
         }
       }
     } catch (e) {
       console.warn('Failed to read research files from localStorage:', e);
     }
-    const seed = DEFAULT_SEED_RESEARCH_FILES;
-    this.saveResearchFiles(seed);
-    return seed;
+
+    if (!initialized) {
+      markSeedsInitialized();
+      const seed = DEFAULT_SEED_RESEARCH_FILES;
+      this.saveResearchFiles(seed, { silent: true });
+      return seed;
+    }
+    return [];
   },
 
-  saveResearchFiles(files: ResearchFile[]): void {
+  saveResearchFiles(files: ResearchFile[], options?: { silent?: boolean }): void {
     try {
       localStorage.setItem(STORAGE_KEY_RESEARCH_FILES, JSON.stringify(files));
     } catch (e) {
@@ -1905,7 +1994,9 @@ export const storage = {
     indexedDBService.putMany(STORES.RESEARCH_FILES, files).catch((err) => {
       console.warn('Async IndexedDB saveResearchFiles error:', err);
     });
-    this.notifyListeners();
+    if (!options?.silent) {
+      this.notifyListeners();
+    }
   },
 
   saveResearchFile(file: ResearchFile): void {
@@ -1963,8 +2054,10 @@ export const storage = {
 
     try {
       const projectCount = await indexedDBService.count(STORES.PROJECTS);
-      if (projectCount === 0) {
-        // First run or empty IndexedDB: seed from localStorage/defaults
+      const initialized = areSeedsInitialized();
+      if (projectCount === 0 && !initialized) {
+        // First run or empty IndexedDB: seed from localStorage/defaults and mark initialized
+        markSeedsInitialized();
         const projects = this.getProjects();
         const styleProfiles = this.getStyleProfiles();
         const internalLinks = this.getInternalLinks();

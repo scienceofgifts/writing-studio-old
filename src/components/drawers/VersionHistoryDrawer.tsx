@@ -116,6 +116,11 @@ export const VersionHistoryDrawer: React.FC<VersionHistoryDrawerProps> = ({
     const result = restoreVersionSnapshot(project, targetVersionId);
     if (result) {
       onUpdateProject(result.updatedProject);
+      window.dispatchEvent(
+        new CustomEvent('sog:restore-editor-content', {
+          detail: { content: result.updatedProject.content, projectId: project.id },
+        })
+      );
       setRestoreConfirmId(null);
       setViewMode('list');
       if (result.updatedProject.versionHistory && result.updatedProject.versionHistory.length > 0) {

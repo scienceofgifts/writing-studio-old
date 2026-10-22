@@ -349,6 +349,27 @@ class SyncEngine {
         // Remote only -> keep in local state (whether active or tombstone)
         finalLocalList.push(remote);
       } else if (local && remote) {
+        // If local is deleted, drop/reject remote document UNLESS remote updatedAt is strictly newer than local deletedAt
+        if (local._isDeleted && !remote._isDeleted) {
+          const localDeletedTime = new Date((local as any).deletedAt || local.updatedAt || 0).getTime();
+          const remoteUpdatedTime = new Date(remote.updatedAt || 0).getTime();
+          if (remoteUpdatedTime <= localDeletedTime) {
+            finalLocalList.push(local);
+            uploadTasks.push(this.writeDocToFirestore(userId, collectionName, id, local));
+            continue;
+          }
+        }
+
+        // If remote is deleted, drop/reject local document UNLESS local updatedAt is strictly newer than remote deletedAt
+        if (remote._isDeleted && !local._isDeleted) {
+          const remoteDeletedTime = new Date((remote as any).deletedAt || remote.updatedAt || 0).getTime();
+          const localUpdatedTime = new Date(local.updatedAt || 0).getTime();
+          if (localUpdatedTime <= remoteDeletedTime) {
+            finalLocalList.push(remote);
+            continue;
+          }
+        }
+
         // Both exist -> compare revision timestamps
         const localTime = new Date(local.updatedAt || (local as any).deletedAt || 0).getTime();
         const remoteTime = new Date(remote.updatedAt || (remote as any).deletedAt || 0).getTime();

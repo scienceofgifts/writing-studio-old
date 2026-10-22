@@ -965,6 +965,7 @@ export const ArticleWorkspace: React.FC<ArticleWorkspaceProps> = ({
         )}
 
         <Editor
+          projectId={project.id}
           content={project.content}
           editorRef={editorRef}
           onChange={(newContent) =>

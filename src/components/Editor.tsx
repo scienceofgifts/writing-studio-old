@@ -75,6 +75,8 @@ export interface AiActionOption {
 
 interface EditorProps {
   content: string; // Semantic HTML document
+  projectId?: string;
+  restoreTrigger?: number | string;
   onChange: (newHtml: string) => void;
   onSelectionChange?: (selectedText: string, range: { start: number; end: number }) => void;
   onExplicitAiAction?: (action: string, selectedText: string, range: { start: number; end: number }) => void;
@@ -84,6 +86,8 @@ interface EditorProps {
 
 export const Editor: React.FC<EditorProps> = ({
   content,
+  projectId,
+  restoreTrigger,
   onChange,
   onSelectionChange,
   onExplicitAiAction,
@@ -96,6 +100,10 @@ export const Editor: React.FC<EditorProps> = ({
   const [linkUrl, setLinkUrl] = useState('');
   const [linkDisplayText, setLinkDisplayText] = useState('');
   const [activeBlockType, setActiveBlockType] = useState('paragraph');
+
+  // Track project ID and restore triggers via refs to break autosave feedback loops
+  const currentProjectIdRef = useRef<string | undefined>(projectId);
+  const prevRestoreTriggerRef = useRef<number | string | undefined>(restoreTrigger);
 
   // Image insertion state
   const [isImagePromptOpen, setIsImagePromptOpen] = useState(false);
@@ -172,18 +180,41 @@ export const Editor: React.FC<EditorProps> = ({
     }
   }, [editor, editorRef]);
 
-  // Sync external content update if changed outside
+  // Only call setContent when switching to a completely different project
   useEffect(() => {
     if (!editor) return;
-    const currentHtml = editor.getHTML();
-    if (content !== currentHtml && content !== undefined) {
-      // Check if genuinely different
-      const isSame = editor.getText().trim() === '' && (content === '' || content === '<p></p>');
-      if (!isSame) {
-        editor.commands.setContent(content, { emitUpdate: false });
-      }
+    if (projectId && projectId !== currentProjectIdRef.current) {
+      currentProjectIdRef.current = projectId;
+      editor.commands.setContent(content || '', { emitUpdate: false });
     }
-  }, [content, editor]);
+  }, [projectId, content, editor]);
+
+  // Handle explicit external restore triggers (e.g. restoring version snapshots or accepting AI diff proposals)
+  useEffect(() => {
+    if (!editor) return;
+    if (restoreTrigger !== undefined && restoreTrigger !== prevRestoreTriggerRef.current) {
+      prevRestoreTriggerRef.current = restoreTrigger;
+      editor.commands.setContent(content || '', { emitUpdate: false });
+    }
+  }, [restoreTrigger, content, editor]);
+
+  // Listen for explicit external restore custom events
+  useEffect(() => {
+    if (!editor) return;
+    const handleRestoreEvent = (e: CustomEvent<{ content: string; projectId?: string }>) => {
+      if (e.detail?.projectId && projectId && e.detail.projectId !== projectId) {
+        return;
+      }
+      if (typeof e.detail?.content === 'string') {
+        editor.commands.setContent(e.detail.content, { emitUpdate: false });
+      }
+    };
+
+    window.addEventListener('sog:restore-editor-content' as any, handleRestoreEvent as any);
+    return () => {
+      window.removeEventListener('sog:restore-editor-content' as any, handleRestoreEvent as any);
+    };
+  }, [editor, projectId]);
 
   // Close menus on outside click
   useEffect(() => {

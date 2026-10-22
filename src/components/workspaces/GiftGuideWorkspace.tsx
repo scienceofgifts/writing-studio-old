@@ -703,6 +703,7 @@ export const GiftGuideWorkspace: React.FC<GiftGuideWorkspaceProps> = ({
             {/* Center WYSIWYG Editor Canvas */}
             <div className="flex-1 flex flex-col overflow-hidden bg-white">
               <Editor
+                projectId={project.id}
                 content={project.content}
                 editorRef={editorRef}
                 onChange={(newContent) =>
