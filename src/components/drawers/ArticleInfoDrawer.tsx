@@ -517,7 +517,7 @@ export const ArticleInfoDrawer: React.FC<ArticleInfoDrawerProps> = ({
                     onClick={() => handleRemoveTag(t)}
                     className="text-[#8c8477] hover:text-rose-700"
                   >
-                    ×
+                    <X className="w-3.5 h-3.5" />
                   </button>
                 </span>
               ))}
@@ -558,7 +558,7 @@ export const ArticleInfoDrawer: React.FC<ArticleInfoDrawerProps> = ({
                     onClick={() => handleRemoveSource(s)}
                     className="text-[#8c8477] hover:text-rose-700 shrink-0"
                   >
-                    ×
+                    <X className="w-3.5 h-3.5" />
                   </button>
                 </li>
               ))}
@@ -610,7 +610,7 @@ export const ArticleInfoDrawer: React.FC<ArticleInfoDrawerProps> = ({
                     onClick={() => handleRemoveRelated(r.url)}
                     className="text-[#8c8477] hover:text-rose-700 shrink-0 p-1"
                   >
-                    ×
+                    <X className="w-3.5 h-3.5" />
                   </button>
                 </div>
               ))}

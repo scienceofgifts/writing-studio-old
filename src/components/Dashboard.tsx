@@ -136,7 +136,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
   };
 
   const formatDate = (dateStr?: string) => {
-    if (!dateStr) return '—';
+    if (!dateStr) return '';
     const d = new Date(dateStr);
     return d.toLocaleDateString(undefined, {
       month: 'short',

@@ -449,6 +449,67 @@ function generateFallbackResponse(payload: any): { proposedText: string; explana
 }
 
 /**
+ * Editorial prompt action route
+ */
+app.post('/api/gemini/action', async (req, res) => {
+  try {
+    const payload = req.body || {};
+    const modelToUse = resolveServerModel(payload.modelOverride || payload.model, 'gemini-3.8-flash');
+
+    if (ai) {
+      try {
+        const { systemInstruction, userPrompt } = buildEditorialPrompt(payload);
+        const response = await ai.models.generateContent({
+          model: modelToUse,
+          contents: userPrompt,
+          config: {
+            systemInstruction,
+            responseMimeType: 'application/json',
+            temperature: 0.7,
+          },
+        });
+
+        const text = response.text?.trim() || '';
+        let parsed: any = null;
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          const match = text.match(/\{[\s\S]*\}/);
+          if (match) {
+            try { parsed = JSON.parse(match[0]); } catch {}
+          }
+        }
+
+        if (parsed && typeof parsed.proposedText === 'string') {
+          return res.json({
+            ok: true,
+            proposedText: parsed.proposedText,
+            explanation: parsed.explanation || 'Refined editorial copy according to Science of Gifts house style.',
+            modelUsed: modelToUse,
+          });
+        }
+      } catch (geminiErr: any) {
+        console.warn('Gemini action execution error, falling back:', geminiErr?.message);
+      }
+    }
+
+    const fallback = generateFallbackResponse(payload);
+    return res.json({
+      ok: true,
+      proposedText: fallback.proposedText,
+      explanation: fallback.explanation,
+      modelUsed: 'heuristic-editorial-engine',
+    });
+  } catch (err: any) {
+    console.error('Gemini action route error:', err);
+    return res.status(500).json({
+      ok: false,
+      error: err?.message || 'Failed to execute editorial action',
+    });
+  }
+});
+
+/**
  * Outline generation prompt builder (Outline Studio)
  * Supports Essay (intellectual progression), Standard Article, Guide, and Custom modes.
  * Consumes Editorial Brief, Angles, Research Library studies, and Internal Links.
