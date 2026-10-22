@@ -157,14 +157,14 @@ export const geminiService = {
       if (!res.ok) {
         const errorData = await res.json().catch(() => ({}));
         const errorMsg = errorData.error || `Server returned ${res.status}`;
-        toast.error('API Error', errorMsg);
+        toast.error('AI Request Failed', errorMsg);
         throw new Error(errorMsg);
       }
 
       const data = await res.json();
       if (!data.ok) {
         const errorMsg = data.error || 'Failed to execute editorial action.';
-        toast.error('API Error', errorMsg);
+        toast.error('AI Request Failed', errorMsg);
         throw new Error(errorMsg);
       }
 
@@ -179,7 +179,7 @@ export const geminiService = {
       };
     } catch (err: any) {
       console.error('Error executing AI action:', err);
-      toast.error('API Error', err?.message || 'Failed to reach editorial service.');
+      toast.error('AI Request Failed', err?.message || 'Failed to reach editorial service.');
       throw err;
     }
   },
@@ -238,14 +238,14 @@ export const geminiService = {
       if (!res.ok) {
         const errorData = await res.json().catch(() => ({}));
         const errorMsg = errorData.error || `Server returned ${res.status}`;
-        toast.error('API Error', errorMsg);
+        toast.error('AI Request Failed', errorMsg);
         throw new Error(errorMsg);
       }
 
       const data = await res.json();
       if (!data.ok) {
         const errorMsg = data.error || 'Failed to generate outline.';
-        toast.error('API Error', errorMsg);
+        toast.error('AI Request Failed', errorMsg);
         throw new Error(errorMsg);
       }
 
@@ -273,7 +273,7 @@ export const geminiService = {
       return { items: [] };
     } catch (err: any) {
       console.error('Error generating outline:', err);
-      toast.error('API Error', err?.message || 'Failed to generate outline.');
+      toast.error('AI Request Failed', err?.message || 'Failed to generate outline.');
       throw err;
     }
   },
@@ -312,14 +312,14 @@ export const geminiService = {
       if (!res.ok) {
         const errorData = await res.json().catch(() => ({}));
         const errorMsg = errorData.error || `Server returned ${res.status}`;
-        toast.error('API Error', errorMsg);
+        toast.error('AI Request Failed', errorMsg);
         throw new Error(errorMsg);
       }
 
       const data = await res.json();
       if (!data.ok) {
         const errorMsg = data.error || 'Failed to analyze style samples.';
-        toast.error('API Error', errorMsg);
+        toast.error('AI Request Failed', errorMsg);
         throw new Error(errorMsg);
       }
 
@@ -333,7 +333,7 @@ export const geminiService = {
       };
     } catch (err: any) {
       console.error('Error analyzing style:', err);
-      toast.error('API Error', err?.message || 'Failed to analyze writing sample style.');
+      toast.error('AI Request Failed', err?.message || 'Failed to analyze writing sample style.');
       throw err;
     }
   },
@@ -381,14 +381,14 @@ export const geminiService = {
       if (!res.ok) {
         const errorData = await res.json().catch(() => ({}));
         const errorMsg = errorData.error || `Server returned ${res.status}`;
-        toast.error('API Error', errorMsg);
+        toast.error('AI Request Failed', errorMsg);
         throw new Error(errorMsg);
       }
 
       const data = await res.json();
       if (!data.ok) {
         const errorMsg = data.error || 'Failed to analyze link opportunities.';
-        toast.error('API Error', errorMsg);
+        toast.error('AI Request Failed', errorMsg);
         throw new Error(errorMsg);
       }
 
@@ -399,7 +399,7 @@ export const geminiService = {
       };
     } catch (err: any) {
       console.error('Error finding link opportunities:', err);
-      toast.error('API Error', err?.message || 'Failed to analyze link opportunities.');
+      toast.error('AI Request Failed', err?.message || 'Failed to analyze link opportunities.');
       throw err;
     }
   },
@@ -488,14 +488,14 @@ export const geminiService = {
       if (!res.ok) {
         const errorData = await res.json().catch(() => ({}));
         const errorMsg = errorData.error || `Server returned ${res.status}`;
-        toast.error('API Error', errorMsg);
+        toast.error('AI Request Failed', errorMsg);
         throw new Error(errorMsg);
       }
 
       const data = await res.json();
       if (!data.ok) {
         const errorMsg = data.error || 'Failed to conduct editorial review.';
-        toast.error('API Error', errorMsg);
+        toast.error('AI Request Failed', errorMsg);
         throw new Error(errorMsg);
       }
 
@@ -520,7 +520,7 @@ export const geminiService = {
       };
     } catch (err: any) {
       console.error('Error running editorial review:', err);
-      toast.error('API Error', err?.message || 'Failed to conduct editorial review.');
+      toast.error('AI Request Failed', err?.message || 'Failed to conduct editorial review.');
       throw err;
     }
   },
@@ -591,14 +591,14 @@ export const geminiService = {
         if (!res.ok) {
           const errorData = await res.json().catch(() => ({}));
           const errorMsg = errorData.error || `Server returned ${res.status}`;
-          toast.error('API Error', errorMsg);
+          toast.error('AI Request Failed', errorMsg);
           throw new Error(errorMsg);
         }
 
         const data = await res.json();
         if (!data.ok) {
           const errorMsg = data.error || 'Failed to complete Quality Control audit.';
-          toast.error('API Error', errorMsg);
+          toast.error('AI Request Failed', errorMsg);
           throw new Error(errorMsg);
         }
 
@@ -668,7 +668,7 @@ export const geminiService = {
       };
     } catch (err: any) {
       console.error('Error running Quality Control:', err);
-      toast.error('API Error', err?.message || 'Failed to execute Quality Control audit.');
+      toast.error('AI Request Failed', err?.message || 'Failed to execute Quality Control audit.');
       throw err;
     }
   },
@@ -702,14 +702,14 @@ export const geminiService = {
       if (!res.ok) {
         const errorData = await res.json().catch(() => ({}));
         const errorMsg = errorData.error || `Server returned ${res.status}`;
-        toast.error('API Error', errorMsg);
+        toast.error('AI Request Failed', errorMsg);
         throw new Error(errorMsg);
       }
 
       const data = await res.json();
       if (!data.ok) {
         const errorMsg = data.error || 'Failed to generate ideas.';
-        toast.error('API Error', errorMsg);
+        toast.error('AI Request Failed', errorMsg);
         throw new Error(errorMsg);
       }
 
@@ -723,7 +723,7 @@ export const geminiService = {
       };
     } catch (err: any) {
       console.error('Error in generateIdeas:', err);
-      toast.error('API Error', err?.message || 'Could not generate ideas. Try again or choose another model.');
+      toast.error('AI Request Failed', err?.message || 'Could not generate ideas. Try again or choose another model.');
       throw err;
     }
   },
@@ -769,14 +769,14 @@ export const geminiService = {
       if (!res.ok) {
         const errorData = await res.json().catch(() => ({}));
         const errorMsg = errorData.error || `Server returned ${res.status}`;
-        toast.error('API Error', errorMsg);
+        toast.error('AI Request Failed', errorMsg);
         throw new Error(errorMsg);
       }
 
       const data = await res.json();
       if (!data.ok) {
         const errorMsg = data.error || 'Failed to generate editorial angles.';
-        toast.error('API Error', errorMsg);
+        toast.error('AI Request Failed', errorMsg);
         throw new Error(errorMsg);
       }
 
@@ -788,7 +788,7 @@ export const geminiService = {
       };
     } catch (err: any) {
       console.error('Error generating editorial angles:', err);
-      toast.error('API Error', err?.message || 'Could not generate editorial angles.');
+      toast.error('AI Request Failed', err?.message || 'Could not generate editorial angles.');
       throw err;
     }
   },
@@ -850,14 +850,14 @@ export const geminiService = {
       if (!res.ok) {
         const errorData = await res.json().catch(() => ({}));
         const errorMsg = errorData.error || `Server returned ${res.status}`;
-        toast.error('API Error', errorMsg);
+        toast.error('AI Request Failed', errorMsg);
         throw new Error(errorMsg);
       }
 
       const data = await res.json();
       if (!data.ok) {
         const errorMsg = data.error || 'Failed to synthesize editorial brief.';
-        toast.error('API Error', errorMsg);
+        toast.error('AI Request Failed', errorMsg);
         throw new Error(errorMsg);
       }
 
@@ -869,7 +869,7 @@ export const geminiService = {
       };
     } catch (err: any) {
       console.error('Error creating editorial brief:', err);
-      toast.error('API Error', err?.message || 'Could not synthesize editorial brief.');
+      toast.error('AI Request Failed', err?.message || 'Could not synthesize editorial brief.');
       throw err;
     }
   },

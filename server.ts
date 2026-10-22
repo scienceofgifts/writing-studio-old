@@ -7,7 +7,7 @@ import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
-import { handleApiRequest } from './src/server/apiRouter';
+import { handleApiRequest } from './worker';
 
 dotenv.config();
 

@@ -51,7 +51,7 @@ export class ResearchService {
   public async lookupMetadata(input: string): Promise<MetadataLookupResult> {
     const trimmed = input.trim();
     if (!trimmed) {
-      toast.error('API Error', 'DOI or URL cannot be empty.');
+      toast.error('AI Request Failed', 'DOI or URL cannot be empty.');
       throw new Error('DOI or URL cannot be empty.');
     }
 
@@ -65,21 +65,21 @@ export class ResearchService {
       if (!response.ok) {
         const errData = await response.json().catch(() => ({}));
         const errMessage = errData.error || `Server returned ${response.status}`;
-        toast.error('API Error', errMessage);
+        toast.error('AI Request Failed', errMessage);
         throw new Error(errMessage);
       }
 
       const data = await response.json();
       if (!data.success && !data.ok) {
         const errMessage = data.error || 'Failed to lookup metadata';
-        toast.error('API Error', errMessage);
+        toast.error('AI Request Failed', errMessage);
         throw new Error(errMessage);
       }
 
       return data;
     } catch (err: any) {
       console.error('Metadata lookup failed:', err);
-      toast.error('API Error', err?.message || 'Failed to lookup metadata.');
+      toast.error('AI Request Failed', err?.message || 'Failed to lookup metadata.');
       throw err;
     }
   }
@@ -110,21 +110,21 @@ export class ResearchService {
       if (!response.ok) {
         const errData = await response.json().catch(() => ({}));
         const errMessage = errData.error || `Server returned ${response.status}`;
-        toast.error('API Error', errMessage);
+        toast.error('AI Request Failed', errMessage);
         throw new Error(errMessage);
       }
 
       const data = await response.json();
       if (!data.success && !data.ok) {
         const errMessage = data.error || 'Failed to extract text from PDF';
-        toast.error('API Error', errMessage);
+        toast.error('AI Request Failed', errMessage);
         throw new Error(errMessage);
       }
 
       return data;
     } catch (err: any) {
       console.error('PDF extraction failed:', err);
-      toast.error('API Error', err?.message || 'Failed to extract text from PDF.');
+      toast.error('AI Request Failed', err?.message || 'Failed to extract text from PDF.');
       throw err;
     }
   }
@@ -152,14 +152,14 @@ export class ResearchService {
       if (!response.ok) {
         const errData = await response.json().catch(() => ({}));
         const errMessage = errData.error || `Server returned ${response.status}`;
-        toast.error('API Error', errMessage);
+        toast.error('AI Request Failed', errMessage);
         throw new Error(errMessage);
       }
 
       const result = await response.json();
       if (!result.ok || !result.analysis) {
         const errMessage = result.error || 'Failed to analyze study.';
-        toast.error('API Error', errMessage);
+        toast.error('AI Request Failed', errMessage);
         throw new Error(errMessage);
       }
 
@@ -169,7 +169,7 @@ export class ResearchService {
       };
     } catch (err: any) {
       console.error('Error analyzing study:', err);
-      toast.error('API Error', err?.message || 'Failed to analyze study.');
+      toast.error('AI Request Failed', err?.message || 'Failed to analyze study.');
       throw err;
     }
   }
@@ -197,21 +197,21 @@ export class ResearchService {
       if (!response.ok) {
         const errData = await response.json().catch(() => ({}));
         const errMessage = errData.error || `Server returned ${response.status}`;
-        toast.error('API Error', errMessage);
+        toast.error('AI Request Failed', errMessage);
         throw new Error(errMessage);
       }
 
       const result = await response.json();
       if (!result.ok || !Array.isArray(result.ideas)) {
         const errMessage = result.error || 'Failed to generate ideas from research.';
-        toast.error('API Error', errMessage);
+        toast.error('AI Request Failed', errMessage);
         throw new Error(errMessage);
       }
 
       return result.ideas;
     } catch (err: any) {
       console.error('Error generating ideas from research:', err);
-      toast.error('API Error', err?.message || 'Failed to generate ideas from research.');
+      toast.error('AI Request Failed', err?.message || 'Failed to generate ideas from research.');
       throw err;
     }
   }
@@ -242,14 +242,14 @@ export class ResearchService {
       if (!response.ok) {
         const errData = await response.json().catch(() => ({}));
         const errMessage = errData.error || `Server returned ${response.status}`;
-        toast.error('API Error', errMessage);
+        toast.error('AI Request Failed', errMessage);
         throw new Error(errMessage);
       }
 
       const result = await response.json();
       if (!result.ok || !Array.isArray(result.outline)) {
         const errMessage = result.error || 'Failed to build research outline.';
-        toast.error('API Error', errMessage);
+        toast.error('AI Request Failed', errMessage);
         throw new Error(errMessage);
       }
 
@@ -259,7 +259,7 @@ export class ResearchService {
       };
     } catch (err: any) {
       console.error('Error building research outline:', err);
-      toast.error('API Error', err?.message || 'Failed to build research outline.');
+      toast.error('AI Request Failed', err?.message || 'Failed to build research outline.');
       throw err;
     }
   }
@@ -464,14 +464,14 @@ export class ResearchService {
       if (!response.ok) {
         const errData = await response.json().catch(() => ({}));
         const errMessage = errData.error || `Server returned ${response.status}`;
-        toast.error('API Error', errMessage);
+        toast.error('AI Request Failed', errMessage);
         throw new Error(errMessage);
       }
 
       const data = await response.json();
       if (!data.ok || !Array.isArray(data.recommendations)) {
         const errMessage = data.error || 'Failed to find citation opportunities.';
-        toast.error('API Error', errMessage);
+        toast.error('AI Request Failed', errMessage);
         throw new Error(errMessage);
       }
 
@@ -516,7 +516,7 @@ export class ResearchService {
       };
     } catch (err: any) {
       console.error('Error finding citations:', err);
-      toast.error('API Error', err?.message || 'Failed to find citations.');
+      toast.error('AI Request Failed', err?.message || 'Failed to find citations.');
       throw err;
     }
   }
