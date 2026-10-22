@@ -1,20 +1,19 @@
 /**
  * Science of Gifts Writing Studio - Centralized API URL Configuration
+ * Forces all API calls to resolve to relative same-origin paths (/api/...) on the same domain.
  */
 
-// Uses explicit VITE_GEMINI_API_URL override if supplied; otherwise defaults to relative same-origin paths.
-export const API_BASE_URL = import.meta.env.VITE_GEMINI_API_URL || '';
+export const API_BASE_URL = '';
 
 /**
- * Resolves a given API endpoint with the configured base URL.
- * Defaults to relative paths (/api/...) on the same origin.
+ * Resolves a given API endpoint to a relative same-origin path (/api/...).
  */
 export function getApiUrl(path: string): string {
   const cleanPath = path.startsWith('/') ? path : `/${path}`;
-  if (API_BASE_URL) {
-    const base = API_BASE_URL.endsWith('/') ? API_BASE_URL.slice(0, -1) : API_BASE_URL;
-    return `${base}${cleanPath}`;
+  if (!cleanPath.startsWith('/api/') && !cleanPath.startsWith('/api')) {
+    return `/api${cleanPath}`;
   }
   return cleanPath;
 }
+
 

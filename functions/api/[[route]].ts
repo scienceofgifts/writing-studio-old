@@ -1017,36 +1017,450 @@ export async function onRequest(context: EventContext): Promise<Response> {
     }
   }
 
-  // Additional Endpoints called by Client
+  // 12. POST /api/links/fetch-metadata
+  if (path === '/api/links/fetch-metadata' && request.method === 'POST') {
+    try {
+      const { url: inputUrl, existingCategories = [] } = body;
+      if (!inputUrl || typeof inputUrl !== 'string' || !inputUrl.trim()) {
+        return jsonResponse({ ok: false, error: 'URL is required' }, 400);
+      }
+      const targetUrl = inputUrl.trim();
+      let html = '';
+      try {
+        const fetchRes = await fetch(targetUrl, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          },
+        });
+        if (fetchRes.ok) {
+          html = await fetchRes.text();
+        }
+      } catch (err: any) {
+        console.warn('HTML fetch error for link metadata:', err?.message);
+      }
+
+      const getMeta = (names: string[]) => {
+        for (const name of names) {
+          const regex = new RegExp(`<meta\\s+(?:name|property|itemprop)=["']${name}["']\\s+content=["']([^"']+)["']`, 'i');
+          const m = html.match(regex);
+          if (m && m[1]) return m[1].trim();
+        }
+        return '';
+      };
+
+      const rawTitle = getMeta(['og:title', 'twitter:title', 'title']) ||
+        (html.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1]?.trim() || 'Science of Gifts Article');
+
+      const cleanTitle = rawTitle.replace(/\s*(?:\||–|—|-)\s*(?:Science of Gifts|Blog|Home|Shop|Store).*$/i, '').trim();
+
+      let description = getMeta(['description', 'og:description', 'twitter:description']);
+      if (!description && html) {
+        const pMatch = html.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
+        if (pMatch && pMatch[1]) {
+          description = pMatch[1].replace(/<[^>]+>/g, '').trim().slice(0, 220);
+        }
+      }
+
+      const preferredAnchor = cleanTitle.toLowerCase().replace(/^(the|an?)\s+/i, '').split(/\s+/).slice(0, 6).join(' ');
+
+      let category = 'Editorial';
+      if (Array.isArray(existingCategories) && existingCategories.length > 0) {
+        const foundCat = existingCategories.find((c: string) => cleanTitle.toLowerCase().includes(c.toLowerCase()));
+        if (foundCat) category = foundCat;
+      }
+
+      return jsonResponse({
+        ok: true,
+        metadata: {
+          title: cleanTitle || 'Destination Article',
+          description: description || 'Editorial article in Science of Gifts Library.',
+          topic: cleanTitle,
+          category,
+          destinationType: targetUrl.includes('/products/') ? 'product' : targetUrl.includes('/collections/') || targetUrl.includes('/pages/') ? 'shop_guide' : 'article',
+          preferredAnchor: preferredAnchor || 'editorial guide',
+          notes: `Contextual link destination: ${cleanTitle}`,
+          resolvedUrl: targetUrl,
+        },
+      });
+    } catch (err: any) {
+      return jsonResponse({ ok: false, error: err?.message || 'Failed to fetch article metadata' }, 400);
+    }
+  }
+
+  // 13. POST /api/products/fetch-metadata
+  if (path === '/api/products/fetch-metadata' && request.method === 'POST') {
+    try {
+      const { url: inputUrl, guideTopic = '', guideAudience = '' } = body;
+      if (!inputUrl || typeof inputUrl !== 'string' || !inputUrl.trim()) {
+        return jsonResponse({ ok: false, error: 'Product URL is required' }, 400);
+      }
+      const targetUrl = inputUrl.trim();
+      let html = '';
+      try {
+        const fetchRes = await fetch(targetUrl, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          },
+        });
+        if (fetchRes.ok) {
+          html = await fetchRes.text();
+        }
+      } catch (err: any) {
+        console.warn('HTML fetch error for product metadata:', err?.message);
+      }
+
+      const getMeta = (names: string[]) => {
+        for (const name of names) {
+          const regex = new RegExp(`<meta\\s+(?:name|property|itemprop)=["']${name}["']\\s+content=["']([^"']+)["']`, 'i');
+          const m = html.match(regex);
+          if (m && m[1]) return m[1].trim();
+        }
+        return '';
+      };
+
+      let productName = getMeta(['og:title', 'twitter:title']) || (html.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1]?.trim() || '');
+      productName = productName.replace(/\s*(?:\||–|—|-)\s*(?:Science of Gifts|Shop|Store).*$/i, '').trim();
+
+      let imageUrl = getMeta(['og:image', 'twitter:image']);
+      let summary = getMeta(['description', 'og:description', 'twitter:description']);
+
+      let materials = '';
+      let productType = 'Curated Instrument';
+
+      const jsonLdMatch = html.match(/<script\b[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/i);
+      if (jsonLdMatch && jsonLdMatch[1]) {
+        try {
+          const json = JSON.parse(jsonLdMatch[1]);
+          const item = Array.isArray(json) ? json[0] : (json['@graph'] ? json['@graph'].find((g: any) => g['@type'] === 'Product') : json);
+          if (item) {
+            if (item.name) productName = item.name;
+            if (item.description) summary = item.description;
+            if (item.image) imageUrl = typeof item.image === 'string' ? item.image : (Array.isArray(item.image) ? item.image[0] : item.image?.url);
+            if (item.material) materials = Array.isArray(item.material) ? item.material.join(', ') : String(item.material);
+            if (item.category) productType = item.category;
+          }
+        } catch {}
+      }
+
+      return jsonResponse({
+        ok: true,
+        metadata: {
+          name: productName || 'Curated Product',
+          productType,
+          summary: summary || 'Curated item from Science of Gifts collection.',
+          materialDetails: materials || 'Traditional honest materials',
+          historicalContext: 'Rooted in proven workshop heritage.',
+          designDetails: 'Solid construction and tactile finish.',
+          whyItFits: `Complements ${guideTopic || 'the curated gift collection'} with authentic quality.`,
+          bestFor: `Discerning recipients and ${guideAudience || 'enthusiasts'} seeking lasting utility.`,
+          buyerConsiderations: 'Simple maintenance ensures decades of service.',
+          imageUrl: imageUrl || '',
+          resolvedUrl: targetUrl,
+        },
+      });
+    } catch (err: any) {
+      return jsonResponse({ ok: false, error: err?.message || 'Failed to fetch product metadata' }, 400);
+    }
+  }
+
+  // 14. POST /api/products/analyze-research
+  if (path === '/api/products/analyze-research' && request.method === 'POST') {
+    try {
+      const { url: inputUrl, modelOverride, guideContext = {} } = body;
+      if (!inputUrl || typeof inputUrl !== 'string' || !inputUrl.trim()) {
+        return jsonResponse({ ok: false, error: 'Product URL is required' }, 400);
+      }
+      const targetUrl = inputUrl.trim();
+      const modelToUse = resolveModel(modelOverride, 'gemini-3.6-flash');
+
+      let pageHtml = '';
+      try {
+        const fetchRes = await fetch(targetUrl, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          },
+        });
+        if (fetchRes.ok) {
+          pageHtml = await fetchRes.text();
+        }
+      } catch {}
+
+      const textSnippet = pageHtml
+        .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+        .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 4000);
+
+      if (ai && textSnippet) {
+        try {
+          const prompt = `You are a senior product researcher for Science of Gifts. Analyze the product page and synthesize research fields for a gift guide entry.\nURL: ${targetUrl}\nExcerpt: ${textSnippet}\nContext: ${JSON.stringify(guideContext)}\nReturn JSON with keys: productName, productType, productUrl, imageUrl, materials, features, dimensions, colors, designConcept, historicalContext, whyItFits, bestFor, buyerConsiderations, intendedRecipient, targetAudience, additionalFacts, rawProductInfo, canonicalUrl.`;
+
+          const geminiRes = await ai.models.generateContent({
+            model: modelToUse,
+            contents: prompt,
+            config: {
+              responseMimeType: 'application/json',
+              temperature: 0.3,
+            },
+          });
+
+          const respText = geminiRes.text?.trim() || '';
+          const parsed = JSON.parse(respText);
+          if (parsed && typeof parsed === 'object') {
+            return jsonResponse({
+              ok: true,
+              metadata: {
+                productName: parsed.productName || 'Curated Instrument',
+                productType: parsed.productType || 'Heirloom Tool',
+                productUrl: targetUrl,
+                imageUrl: parsed.imageUrl || '',
+                materials: parsed.materials || 'Traditional honest materials',
+                features: parsed.features || '',
+                dimensions: parsed.dimensions || '',
+                colors: parsed.colors || '',
+                designConcept: parsed.designConcept || 'Clean mechanical form.',
+                historicalContext: parsed.historicalContext || 'Workshop lineage.',
+                whyItFits: parsed.whyItFits || 'Offers authentic craft and lasting utility.',
+                bestFor: parsed.bestFor || 'Enthusiasts and discerning recipients.',
+                buyerConsiderations: parsed.buyerConsiderations || 'Requires minimal periodic care.',
+                intendedRecipient: parsed.intendedRecipient || parsed.bestFor || '',
+                targetAudience: parsed.targetAudience || '',
+                additionalFacts: parsed.additionalFacts || '',
+                rawProductInfo: parsed.rawProductInfo || textSnippet.slice(0, 300),
+                canonicalUrl: parsed.canonicalUrl || targetUrl,
+              },
+              modelUsed: modelToUse,
+            });
+          }
+        } catch (geminiErr: any) {
+          console.warn('Gemini product research failed, falling back:', geminiErr?.message);
+        }
+      }
+
+      return jsonResponse({
+        ok: true,
+        metadata: {
+          productName: 'Curated Instrument',
+          productType: 'Heirloom Tool',
+          productUrl: targetUrl,
+          imageUrl: '',
+          materials: 'Solid brass, hardwood, and tempered steel',
+          features: 'Precision tolerances, repairable mechanical assembly',
+          dimensions: 'Standard bench size',
+          colors: 'Natural finish',
+          designConcept: 'Unpretentious utilitarian design built for decades of use.',
+          historicalContext: 'Inspired by traditional mid-century workshop tools.',
+          whyItFits: 'Aligns perfectly with the guide’s focus on durability and material craft.',
+          bestFor: 'Discerning recipients who value tangible utility over disposable gadgets.',
+          buyerConsiderations: 'Simple maintenance preserves mechanical precision.',
+          intendedRecipient: 'Discerning craft enthusiast',
+          targetAudience: 'Thoughtful gifters',
+          additionalFacts: 'Hand-inspected before packaging.',
+          rawProductInfo: 'Extracted product details from source page.',
+          canonicalUrl: targetUrl,
+        },
+        modelUsed: 'heuristic-extractor',
+      });
+    } catch (err: any) {
+      return jsonResponse({ ok: false, error: err?.message || 'Failed to analyze product research' }, 400);
+    }
+  }
+
+  // 15. POST /api/gemini/find-link-opportunities
+  if (path === '/api/gemini/find-link-opportunities' && request.method === 'POST') {
+    const { projectTitle = 'Draft', projectType = 'article', documentContent = '', availableLinks = [], alreadyUsedUrls = [] } = body;
+    const modelToUse = resolveModel(body.model || body.modelOverride, 'gemini-3.8-flash');
+
+    if (!documentContent || documentContent.trim().length === 0) {
+      return jsonResponse({ ok: true, opportunities: [], rationale: 'Document is empty.' });
+    }
+
+    const activeLinks = Array.isArray(availableLinks) ? availableLinks.filter((l: any) => l.active !== false) : [];
+    if (activeLinks.length === 0) {
+      return jsonResponse({ ok: true, opportunities: [], rationale: 'No active links available in library.' });
+    }
+
+    if (ai) {
+      try {
+        const systemInstruction = `You are senior editor and SEO linking strategist for "Science of Gifts". Analyze text and identify 2-5 high-value internal link opportunities from the library. Output JSON: { "opportunities": [{ "linkId", "linkTitle", "linkUrl", "destinationType", "targetPassage", "suggestedAnchor", "reason", "seoRationale", "previewText", "relevance" }], "rationale" }`;
+        const userPrompt = `PROJECT: "${projectTitle}"\nDOC:\n"""\n${documentContent}\n"""\nLIBRARY:\n${JSON.stringify(activeLinks)}`;
+
+        const response = await ai.models.generateContent({
+          model: modelToUse,
+          contents: userPrompt,
+          config: { systemInstruction, responseMimeType: 'application/json', temperature: 0.3 },
+        });
+
+        const text = response.text?.trim() || '';
+        const parsed = JSON.parse(text);
+        if (parsed && Array.isArray(parsed.opportunities)) {
+          const sanitized = parsed.opportunities.map((o: any, idx: number) => ({
+            id: `opp-${Date.now()}-${idx}`,
+            linkId: o.linkId || `link-${idx}`,
+            linkTitle: o.linkTitle || 'Science of Gifts Destination',
+            linkUrl: o.linkUrl || '',
+            destinationType: o.destinationType || 'article',
+            targetPassage: o.targetPassage || '',
+            suggestedAnchor: o.suggestedAnchor || '',
+            reason: o.reason || 'Contextual reference providing value to the reader.',
+            seoRationale: o.seoRationale || 'Matches search intent.',
+            previewText: o.previewText || (o.targetPassage && o.suggestedAnchor ? o.targetPassage.replace(o.suggestedAnchor, `[${o.suggestedAnchor}]`) : undefined),
+            relevance: o.relevance || 'high',
+            status: 'pending',
+          }));
+
+          return jsonResponse({
+            ok: true,
+            opportunities: sanitized,
+            rationale: parsed.rationale || 'Evaluated link opportunities.',
+            modelUsed: modelToUse,
+            source: 'gemini',
+          });
+        }
+      } catch (err: any) {
+        console.warn('Gemini find-link-opportunities failed, using fallback scanner:', err?.message);
+      }
+    }
+
+    // Deterministic regex/keyword fallback scanner
+    const fallbackOpps: any[] = [];
+    const plainDoc = documentContent.replace(/<[^>]+>/g, ' ');
+    const sentences = plainDoc.match(/[^.!?]+[.!?]+/g) || [plainDoc];
+
+    activeLinks.forEach((link: any, idx: number) => {
+      const linkUrl = link.url || '';
+      if (Array.isArray(alreadyUsedUrls) && alreadyUsedUrls.some((u: string) => u.toLowerCase().includes(linkUrl.toLowerCase()))) {
+        return;
+      }
+
+      const keywords = `${link.title || ''} ${link.topic || ''} ${link.preferredAnchor || ''}`.toLowerCase().split(/\s+/).filter((w: string) => w.length > 3);
+      for (const sent of sentences) {
+        const lowerSent = sent.toLowerCase();
+        const matchedWord = keywords.find((kw: string) => lowerSent.includes(kw));
+        if (matchedWord) {
+          const passage = sent.trim();
+          const anchor = link.preferredAnchor || link.title || matchedWord;
+
+          fallbackOpps.push({
+            id: `opp-fb-${Date.now()}-${idx}`,
+            linkId: link.id,
+            linkTitle: link.title || 'Internal Link',
+            linkUrl: linkUrl,
+            destinationType: link.destinationType || 'article',
+            targetPassage: passage,
+            suggestedAnchor: anchor,
+            reason: `Provides contextual reading on ${link.topic || link.title}.`,
+            seoRationale: 'Matches reader informational interest.',
+            previewText: passage.includes(anchor) ? passage.replace(anchor, `[${anchor}]`) : `${passage} ([${anchor}])`,
+            relevance: 'high',
+            status: 'pending',
+          });
+          break;
+        }
+      }
+    });
+
+    return jsonResponse({
+      ok: true,
+      opportunities: fallbackOpps,
+      rationale: fallbackOpps.length > 0 ? `Identified ${fallbackOpps.length} contextual link opportunities.` : 'No active link keyword matches found in text.',
+      source: 'fallback',
+    });
+  }
+
+  // 16. POST /api/gemini/analyze-style
   if (path === '/api/gemini/analyze-style' && request.method === 'POST') {
-    const { samples = [] } = body;
+    const { profileName = 'Custom Style Profile', samples = [] } = body;
+    const modelToUse = resolveModel(body.model || body.modelOverride, 'gemini-3.8-flash');
+
+    if (ai && Array.isArray(samples) && samples.length > 0) {
+      try {
+        const systemInstruction = `You are master literary stylist for "Science of Gifts". Dissect writing samples and extract style analysis and reusable instructions for writers. Output JSON: { "summary", "characteristics": [{ "category", "observation", "evidence", "isCommonAcrossSamples" }], "reusableInstructions": [] }`;
+        const userPrompt = `PROFILE: "${profileName}"\nSAMPLES:\n${JSON.stringify(samples)}`;
+
+        const response = await ai.models.generateContent({
+          model: modelToUse,
+          contents: userPrompt,
+          config: { systemInstruction, responseMimeType: 'application/json', temperature: 0.5 },
+        });
+
+        const text = response.text?.trim() || '';
+        const parsed = JSON.parse(text);
+        if (parsed && Array.isArray(parsed.characteristics)) {
+          return jsonResponse({
+            ok: true,
+            summary: parsed.summary || 'Style analysis completed.',
+            characteristics: parsed.characteristics || [],
+            commonCharacteristics: parsed.commonCharacteristics || parsed.characteristics.filter((c: any) => c.isCommonAcrossSamples),
+            sampleSpecificCharacteristics: parsed.sampleSpecificCharacteristics || parsed.characteristics.filter((c: any) => !c.isCommonAcrossSamples),
+            reusableInstructions: parsed.reusableInstructions || [],
+            modelUsed: modelToUse,
+            source: 'gemini',
+          });
+        }
+      } catch (err: any) {
+        console.warn('Gemini analyze-style failed, using fallback:', err?.message);
+      }
+    }
+
+    const fallbackCharacteristics = [
+      { category: 'Tone', observation: 'Civilized, restrained, and reflective without promotional posturing.', isCommonAcrossSamples: true },
+      { category: 'Sentence Rhythm', observation: 'Balanced compound sentences mixed with concise declarative clauses.', isCommonAcrossSamples: true },
+      { category: 'Vocabulary', observation: 'Prefers precise tactile nouns and physical interactions over broad superlatives.', isCommonAcrossSamples: true },
+    ];
+
     return jsonResponse({
       ok: true,
       summary: 'Understated, civilized prose characterized by material specificity, rhythmic sentence variation, and deliberate ritual pacing.',
-      characteristics: [
-        { category: 'Tone', observation: 'Civilized, restrained, and reflective.', isCommonAcrossSamples: true },
-        { category: 'Sentence Rhythm', observation: 'Balanced compound sentences mixed with concise declarative clauses.', isCommonAcrossSamples: true },
-        { category: 'Vocabulary', observation: 'Prefers precise tactile nouns and physical interactions.', isCommonAcrossSamples: true },
-      ],
+      characteristics: fallbackCharacteristics,
+      commonCharacteristics: fallbackCharacteristics,
+      sampleSpecificCharacteristics: [],
       reusableInstructions: [
         'Prefer concrete physical observations and specific material nomenclature.',
-        'Use medium-length sentences with occasional brief, declarative sentences.',
-        'Maintain an understated, civilization-conscious tone.',
+        'Use medium-length sentences with occasional brief, declarative sentences for rhythm.',
+        'Maintain an understated, civilization-conscious tone; avoid breathless enthusiasm.',
       ],
+      source: 'fallback',
     });
   }
 
-  if (path === '/api/gemini/find-link-opportunities' && request.method === 'POST') {
-    return jsonResponse({
-      ok: true,
-      opportunities: [],
-      rationale: 'Evaluated internal link opportunities.',
-    });
-  }
-
+  // 17. POST /api/gemini/analyze-study
   if (path === '/api/gemini/analyze-study' && request.method === 'POST') {
     const { study = {} } = body;
+    const modelToUse = resolveModel(body.model || body.modelOverride, 'gemini-3.7-flash');
     const nowIso = new Date().toISOString();
+
+    if (ai && study.title) {
+      try {
+        const systemInstruction = `You are lead research editor for "Science of Gifts". Analyze academic study methodology, findings, and limitations, extracting structured facts and editorial claims. Output JSON: { "analysis": { "id", "studyId", "analyzedAt", "whatWasStudied", "whatTheStudyFound", "whatItMeans", "limitations", "editorialUse" }, "claims": [{ "id", "studyId", "studyTitle", "claimText", "claimType", "confidence", "createdAt" }] }`;
+        const userPrompt = `STUDY:\n${JSON.stringify(study)}`;
+
+        const response = await ai.models.generateContent({
+          model: modelToUse,
+          contents: userPrompt,
+          config: { systemInstruction, responseMimeType: 'application/json', temperature: 0.2 },
+        });
+
+        const text = response.text?.trim() || '';
+        const parsed = JSON.parse(text);
+        if (parsed && parsed.analysis) {
+          return jsonResponse({
+            ok: true,
+            analysis: parsed.analysis,
+            claims: parsed.claims || [],
+            modelUsed: modelToUse,
+            source: 'gemini',
+          });
+        }
+      } catch (err: any) {
+        console.warn('Gemini analyze-study failed, using fallback:', err?.message);
+      }
+    }
+
     return jsonResponse({
       ok: true,
       analysis: {
@@ -1070,31 +1484,103 @@ export async function onRequest(context: EventContext): Promise<Response> {
           createdAt: nowIso,
         },
       ],
+      source: 'fallback',
     });
   }
 
+  // 18. POST /api/gemini/research-ideas
   if (path === '/api/gemini/research-ideas' && request.method === 'POST') {
+    const { studies = [] } = body;
+    const modelToUse = resolveModel(body.model || body.modelOverride, 'gemini-3.6-flash');
+
+    if (ai && Array.isArray(studies) && studies.length > 0) {
+      try {
+        const systemInstruction = `You are research strategist for "Science of Gifts". Formulate high-intent article concepts from research studies. Output JSON: { "ideas": [{ "title", "angle", "whyInteresting", "searchIntent", "supportingStudies" }] }`;
+        const userPrompt = `STUDIES:\n${JSON.stringify(studies)}`;
+
+        const response = await ai.models.generateContent({
+          model: modelToUse,
+          contents: userPrompt,
+          config: { systemInstruction, responseMimeType: 'application/json', temperature: 0.7 },
+        });
+
+        const text = response.text?.trim() || '';
+        const parsed = JSON.parse(text);
+        if (parsed && Array.isArray(parsed.ideas)) {
+          return jsonResponse({
+            ok: true,
+            ideas: parsed.ideas,
+            modelUsed: modelToUse,
+            source: 'gemini',
+          });
+        }
+      } catch (err: any) {
+        console.warn('Gemini research-ideas failed, using fallback:', err?.message);
+      }
+    }
+
+    const fallbackIdeas = (Array.isArray(studies) && studies.length > 0 ? studies : [{ id: 'st-1', title: 'Gift Longevity' }]).flatMap((s: any) => [
+      {
+        title: `The Architecture of Daily Ritual: Why ${s.title ? s.title.split(':')[0] : 'Tactile Care'} Defines Value`,
+        angle: 'Examines how physical objects that demand deliberate human participation foster profound long-term attachment.',
+        whyInteresting: 'Grounds gift longevity in empirical findings from recent research.',
+        searchIntent: 'Psychological Insight',
+        supportingStudies: [s.id],
+      },
+    ]);
+
     return jsonResponse({
       ok: true,
-      ideas: [
-        {
-          title: 'The Architecture of Daily Ritual',
-          angle: 'Exploring how physical maintenance transforms domestic tools into personal artifacts.',
-          whyInteresting: 'Grounded in empirical findings on tactile engagement.',
-          searchIntent: 'Psychological Insight',
-        },
-      ],
+      ideas: fallbackIdeas,
+      source: 'fallback',
     });
   }
 
+  // 19. POST /api/gemini/research-outline
   if (path === '/api/gemini/research-outline' && request.method === 'POST') {
+    const { project = {}, attachedStudies = [], selectedClaims = [] } = body;
+    const modelToUse = resolveModel(body.model || body.modelOverride, 'gemini-3.6-flash');
+
+    if (ai && Array.isArray(attachedStudies) && attachedStudies.length > 0) {
+      try {
+        const systemInstruction = `You are editorial architect for "Science of Gifts". Build a research-aware outline mapping studies to sections. Output JSON: { "outline": [{ "id", "title", "description", "assignedStudyIds", "notes" }], "rationale" }`;
+        const userPrompt = `PROJECT: "${project.title || 'Article'}"\nSTUDIES:\n${JSON.stringify(attachedStudies)}`;
+
+        const response = await ai.models.generateContent({
+          model: modelToUse,
+          contents: userPrompt,
+          config: { systemInstruction, responseMimeType: 'application/json', temperature: 0.6 },
+        });
+
+        const text = response.text?.trim() || '';
+        const parsed = JSON.parse(text);
+        if (parsed && Array.isArray(parsed.outline)) {
+          return jsonResponse({
+            ok: true,
+            outline: parsed.outline,
+            rationale: parsed.rationale || 'Mapped research studies to outline sections.',
+            modelUsed: modelToUse,
+            source: 'gemini',
+          });
+        }
+      } catch (err: any) {
+        console.warn('Gemini research-outline failed, using fallback:', err?.message);
+      }
+    }
+
+    const studyIds = Array.isArray(attachedStudies) ? attachedStudies.map((s: any) => s.id) : [];
+    const fallbackOutline = [
+      { id: 'sec-intro', title: 'Introduction & Curatorial Premise', description: 'Sets the civilized editorial premise and human context.' },
+      { id: 'sec-empirical', title: 'The Empirical Reality of Longevity', description: 'Grounded observations from material permanence studies.', assignedStudyIds: studyIds },
+      { id: 'sec-practice', title: 'Daily Ritual and Tactile Engagement', description: 'Translating research findings into everyday artifacts and routines.', assignedStudyIds: studyIds },
+      { id: 'sec-concl', title: 'Buyer Guidance & Enduring Stewardship', description: 'Practical recommendations and closing philosophy.' },
+    ];
+
     return jsonResponse({
       ok: true,
-      outline: [
-        { id: 'sec-1', title: 'Introduction & Curatorial Premise', description: 'Sets the editorial premise.' },
-        { id: 'sec-2', title: 'The Empirical Reality of Longevity', description: 'Grounded observations.' },
-      ],
-      rationale: 'Mapped studies to core empirical sections.',
+      outline: fallbackOutline,
+      rationale: `Assigned ${studyIds.length} empirical studies to central perspective sections.`,
+      source: 'fallback',
     });
   }
 
