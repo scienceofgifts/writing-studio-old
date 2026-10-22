@@ -1,11 +1,9 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "writing-studio",
-  "main": "worker.ts",
+  "main": "src/worker.ts",
   "compatibility_date": "2025-01-09",
-  "compatibility_flags": [
-    "nodejs_compat"
-  ],
+  "compatibility_flags": ["nodejs_compat"],
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS"
