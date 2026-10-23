@@ -709,7 +709,8 @@ export const GiftGuideWorkspace: React.FC<GiftGuideWorkspaceProps> = ({
                 onChange={(newContent) =>
                   onChange({
                     ...project,
-                    content: ensureSemanticHtml(newContent),
+                    content: newContent,
+                    updatedAt: new Date().toISOString(),
                   })
                 }
                 onExplicitAiAction={async (action, text, range) => {

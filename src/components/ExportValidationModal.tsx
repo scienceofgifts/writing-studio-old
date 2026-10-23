@@ -56,7 +56,6 @@ export const ExportValidationModal: React.FC<ExportValidationModalProps> = ({
       role="dialog"
       aria-modal="true"
       className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/45 backdrop-blur-2xs animate-fade-in"
-      onClick={onClose}
     >
       <div
         className="w-full max-w-lg bg-[#faf9f6] border border-[#dcd6ca] rounded-2xl shadow-2xl flex flex-col max-h-[85vh] overflow-hidden"

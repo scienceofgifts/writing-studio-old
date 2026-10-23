@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState } from 'react';
 import { DiffProposal } from '../types/project';
 import { Check, X, Copy, ArrowRight, ShieldCheck, Sparkles, Cpu } from 'lucide-react';
 import { extractPlainTextFromHtml, ensureSemanticHtml } from '../utils/richText';
@@ -17,15 +17,6 @@ export const DiffReviewModal: React.FC<DiffReviewModalProps> = ({
 }) => {
   const [copied, setCopied] = useState(false);
   const [viewMode, setViewMode] = useState<'split' | 'proposed'>('split');
-  const copyTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-
-  useEffect(() => {
-    return () => {
-      if (copyTimeoutRef.current) {
-        clearTimeout(copyTimeoutRef.current);
-      }
-    };
-  }, []);
 
   if (!proposal) return null;
 
@@ -38,10 +29,7 @@ export const DiffReviewModal: React.FC<DiffReviewModalProps> = ({
   const handleCopy = () => {
     navigator.clipboard.writeText(proposedPlain || proposal.proposedText);
     setCopied(true);
-    if (copyTimeoutRef.current) {
-      clearTimeout(copyTimeoutRef.current);
-    }
-    copyTimeoutRef.current = setTimeout(() => setCopied(false), 2000);
+    setTimeout(() => setCopied(false), 2000);
   };
 
   return (

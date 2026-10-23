@@ -891,7 +891,8 @@ export const ProductCopyWorkspace: React.FC<ProductCopyWorkspaceProps> = ({
                 onChange={(newContent) =>
                   onChange({
                     ...project,
-                    content: ensureSemanticHtml(newContent),
+                    content: newContent,
+                    updatedAt: new Date().toISOString(),
                   })
                 }
                 onSelectionChange={(text, range) => {

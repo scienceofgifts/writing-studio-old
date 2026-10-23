@@ -4,7 +4,7 @@
  * author details, hero image, SEO fields, tags, sources, and related content.
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { ArticleMetadata } from '../../types/project';
 import { storage } from '../../services/storage';
 import { slugify } from '../../services/articleExport';
@@ -44,11 +44,6 @@ export const ArticleInfoDrawer: React.FC<ArticleInfoDrawerProps> = ({
   const [sourceInput, setSourceInput] = useState('');
   const [relatedTitleInput, setRelatedTitleInput] = useState('');
   const [relatedUrlInput, setRelatedUrlInput] = useState('');
-  const [imgError, setImgError] = useState(false);
-
-  useEffect(() => {
-    setImgError(false);
-  }, [metadata.heroImage?.url]);
 
   if (!isOpen) return null;
 
@@ -322,18 +317,12 @@ export const ArticleInfoDrawer: React.FC<ArticleInfoDrawerProps> = ({
 
           {metadata.heroImage?.url && (
             <div className="rounded-lg overflow-hidden border border-[#dcd6ca] bg-[#f5f2ea] aspect-16/9 relative max-h-36 flex items-center justify-center">
-              {imgError && (
-                <div className="flex flex-col items-center justify-center gap-1.5 p-3 text-center text-[#8a8275] text-[11px]">
-                  <ImageIcon className="w-5 h-5 text-[#a8a194]" />
-                  <span>Unable to load image from provided URL</span>
-                </div>
-              )}
               <img
                 src={metadata.heroImage.url}
                 alt={metadata.heroImage.altText || 'Hero preview'}
-                className={`w-full h-full object-cover ${imgError ? 'hidden' : 'block'}`}
-                onError={() => {
-                  setImgError(true);
+                className="w-full h-full object-cover"
+                onError={(e) => {
+                  (e.currentTarget as HTMLElement).style.display = 'none';
                 }}
               />
             </div>
@@ -528,7 +517,7 @@ export const ArticleInfoDrawer: React.FC<ArticleInfoDrawerProps> = ({
                     onClick={() => handleRemoveTag(t)}
                     className="text-[#8c8477] hover:text-rose-700"
                   >
-                    <X className="w-3.5 h-3.5" />
+                    ×
                   </button>
                 </span>
               ))}
@@ -569,7 +558,7 @@ export const ArticleInfoDrawer: React.FC<ArticleInfoDrawerProps> = ({
                     onClick={() => handleRemoveSource(s)}
                     className="text-[#8c8477] hover:text-rose-700 shrink-0"
                   >
-                    <X className="w-3.5 h-3.5" />
+                    ×
                   </button>
                 </li>
               ))}
@@ -621,7 +610,7 @@ export const ArticleInfoDrawer: React.FC<ArticleInfoDrawerProps> = ({
                     onClick={() => handleRemoveRelated(r.url)}
                     className="text-[#8c8477] hover:text-rose-700 shrink-0 p-1"
                   >
-                    <X className="w-3.5 h-3.5" />
+                    ×
                   </button>
                 </div>
               ))}

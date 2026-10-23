@@ -15,7 +15,7 @@ export function ensureSemanticHtml(content: string): string {
   const trimmed = content.trim();
 
   // If already semantic HTML tags, return as is
-  if (/^<(p|h1|h2|h3|h4|blockquote|ul|ol|div)/i.test(trimmed)) {
+  if (/^<(p|h[1-6]|blockquote|ul|ol|div|img|pre|hr|figure|table|section|article)\b/i.test(trimmed)) {
     return trimmed;
   }
 
@@ -117,3 +117,38 @@ export function countWords(content: string): number {
   if (!plainText.trim()) return 0;
   return plainText.trim().split(/\s+/).filter(Boolean).length;
 }
+
+/**
+ * Normalizes editor HTML so harmless serialization or storage normalization differences
+ * (such as empty paragraph variants, non-breaking spaces, or newlines between block tags)
+ * do not trigger unnecessary setContent() calls.
+ */
+export function normalizeEditorHtml(html: string | undefined | null): string {
+  if (!html) return '<p></p>';
+  const semantic = ensureSemanticHtml(html).trim();
+  if (
+    !semantic ||
+    semantic === '<p></p>' ||
+    semantic === '<p><br></p>' ||
+    semantic === '<p><br class="ProseMirror-trailingBreak"></p>'
+  ) {
+    return '<p></p>';
+  }
+  return semantic
+    .replace(/\u00a0/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(
+      /<\/(p|h[1-6]|ul|ol|li|blockquote|div|pre)>\s+<((?:p|h[1-6]|ul|ol|li|blockquote|div|pre|hr|img)\b)/gi,
+      '</$1><$2'
+    )
+    .trim();
+}
+
+export function isEquivalentEditorHtml(
+  a: string | undefined | null,
+  b: string | undefined | null
+): boolean {
+  if (a === b) return true;
+  return normalizeEditorHtml(a) === normalizeEditorHtml(b);
+}
+

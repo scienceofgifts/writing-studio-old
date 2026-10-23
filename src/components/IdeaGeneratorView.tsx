@@ -3,7 +3,7 @@
  * Uncovers high-intent article concepts and provides a persistent personal shelf of saved ideas.
  */
 
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   Lightbulb,
   Sparkles,
@@ -96,16 +96,6 @@ export const IdeaGeneratorView: React.FC<IdeaGeneratorViewProps> = ({
   const [lastDurationMs, setLastDurationMs] = useState<number | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  const copyTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-
-  // Clean up pending copy timeout on unmount
-  useEffect(() => {
-    return () => {
-      if (copyTimeoutRef.current) {
-        clearTimeout(copyTimeoutRef.current);
-      }
-    };
-  }, []);
 
   // Saved Ideas State
   const [savedIdeas, setSavedIdeas] = useState<SavedEditorialIdea[]>(() => storage.getSavedIdeas());
@@ -218,11 +208,7 @@ export const IdeaGeneratorView: React.FC<IdeaGeneratorViewProps> = ({
     navigator.clipboard.writeText(textToCopy);
     setCopiedId((idea as any).id);
     toast.info('Copied to Clipboard', `"${idea.title}" copied.`);
-
-    if (copyTimeoutRef.current) {
-      clearTimeout(copyTimeoutRef.current);
-    }
-    copyTimeoutRef.current = setTimeout(() => {
+    setTimeout(() => {
       setCopiedId(null);
     }, 2000);
   };

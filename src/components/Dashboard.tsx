@@ -136,7 +136,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
   };
 
   const formatDate = (dateStr?: string) => {
-    if (!dateStr) return '';
+    if (!dateStr) return '—';
     const d = new Date(dateStr);
     return d.toLocaleDateString(undefined, {
       month: 'short',
@@ -148,7 +148,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const handleStartRename = (proj: WritingProject, e: React.MouseEvent) => {
     e.stopPropagation();
     setEditingTitleId(proj.id);
-    setEditingTitleText(proj.title || '');
+    setEditingTitleText(proj.title);
   };
 
   const handleSaveRename = (id: string, e?: React.MouseEvent | React.FormEvent) => {

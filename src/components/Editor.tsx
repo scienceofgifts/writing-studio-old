@@ -12,8 +12,23 @@ import Underline from '@tiptap/extension-underline';
 import Link from '@tiptap/extension-link';
 import Image from '@tiptap/extension-image';
 import Superscript from '@tiptap/extension-superscript';
+import { fetchLinkMetadata } from '../services/linkMetadataService';
+import { cleanTrackingParameters, hasTrackingParameters, isValidUrl } from '../utils/urlUtils';
+import { normalizeEditorHtml } from '../utils/richText';
 import { storage } from '../services/storage';
-import { cleanTrackingParameters, hasTrackingParameters } from '../utils/urlUtils';
+import { InternalLink } from '../types/internalLink';
+
+function escapeHtmlAttr(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function escapeHtml(str: string): string {
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
 
 const CustomSuperscript = Superscript.extend({
   addAttributes() {
@@ -35,6 +50,32 @@ const CustomSuperscript = Superscript.extend({
             attributes.class ||
             'citation-ref text-[11px] font-semibold text-amber-900 select-none cursor-pointer',
         }),
+      },
+    };
+  },
+});
+
+const CustomLink = Link.extend({
+  addAttributes() {
+    return {
+      ...this.parent?.(),
+      target: {
+        default: '_self',
+        parseHTML: (element) => element.getAttribute('target') || '_self',
+        renderHTML: (attributes) => {
+          if (!attributes.target || attributes.target === '_self') {
+            return { target: '_self' };
+          }
+          return { target: attributes.target, rel: 'noopener noreferrer' };
+        },
+      },
+      title: {
+        default: null,
+        parseHTML: (element) => element.getAttribute('title'),
+        renderHTML: (attributes) => {
+          if (!attributes.title) return {};
+          return { title: attributes.title };
+        },
       },
     };
   },
@@ -65,6 +106,7 @@ import {
   Clock,
   ChevronDown,
   BookOpen,
+  Loader2,
 } from 'lucide-react';
 
 export interface AiActionOption {
@@ -74,9 +116,8 @@ export interface AiActionOption {
 }
 
 interface EditorProps {
-  content: string; // Semantic HTML document
   projectId?: string;
-  restoreTrigger?: number | string;
+  content: string; // Semantic HTML document
   onChange: (newHtml: string) => void;
   onSelectionChange?: (selectedText: string, range: { start: number; end: number }) => void;
   onExplicitAiAction?: (action: string, selectedText: string, range: { start: number; end: number }) => void;
@@ -85,9 +126,8 @@ interface EditorProps {
 }
 
 export const Editor: React.FC<EditorProps> = ({
-  content,
   projectId,
-  restoreTrigger,
+  content,
   onChange,
   onSelectionChange,
   onExplicitAiAction,
@@ -99,11 +139,11 @@ export const Editor: React.FC<EditorProps> = ({
   const [isLinkPromptOpen, setIsLinkPromptOpen] = useState(false);
   const [linkUrl, setLinkUrl] = useState('');
   const [linkDisplayText, setLinkDisplayText] = useState('');
+  const [linkTitle, setLinkTitle] = useState('');
+  const [linkTarget, setLinkTarget] = useState<'_self' | '_blank'>('_self');
+  const [isFetchingTitle, setIsFetchingTitle] = useState(false);
+  const [hasUserEditedTitle, setHasUserEditedTitle] = useState(false);
   const [activeBlockType, setActiveBlockType] = useState('paragraph');
-
-  // Track project ID and restore triggers via refs to break autosave feedback loops
-  const currentProjectIdRef = useRef<string | undefined>(projectId);
-  const prevRestoreTriggerRef = useRef<number | string | undefined>(restoreTrigger);
 
   // Image insertion state
   const [isImagePromptOpen, setIsImagePromptOpen] = useState(false);
@@ -114,6 +154,13 @@ export const Editor: React.FC<EditorProps> = ({
   const aiMenuRef = useRef<HTMLDivElement>(null);
   const linkPopoverRef = useRef<HTMLDivElement>(null);
   const imagePopoverRef = useRef<HTMLDivElement>(null);
+
+  // Track local editor emissions vs. external document replacements
+  const lastProjectIdRef = useRef<string | undefined>(projectId);
+  const lastLocalHtmlRef = useRef<string>(content);
+  const recentLocalEmissionsRef = useRef<Set<string>>(
+    new Set([content, normalizeEditorHtml(content)])
+  );
 
   const editor = useEditor({
     extensions: [
@@ -129,13 +176,9 @@ export const Editor: React.FC<EditorProps> = ({
           class: 'rounded-xl max-w-full my-4 border border-[#e5dfd3]',
         },
       }),
-      Link.configure({
+      CustomLink.configure({
         openOnClick: false,
         autolink: true,
-        HTMLAttributes: {
-          target: '_blank',
-          rel: 'noopener noreferrer',
-        },
       }),
       CustomSuperscript,
     ],
@@ -147,6 +190,14 @@ export const Editor: React.FC<EditorProps> = ({
     },
     onUpdate: ({ editor }) => {
       const html = editor.getHTML();
+      const norm = normalizeEditorHtml(html);
+      lastLocalHtmlRef.current = html;
+      recentLocalEmissionsRef.current.add(html);
+      recentLocalEmissionsRef.current.add(norm);
+      if (recentLocalEmissionsRef.current.size > 200) {
+        const entries = Array.from(recentLocalEmissionsRef.current);
+        recentLocalEmissionsRef.current = new Set(entries.slice(entries.length - 100));
+      }
       onChange(html);
     },
     onSelectionUpdate: ({ editor }) => {
@@ -180,41 +231,68 @@ export const Editor: React.FC<EditorProps> = ({
     }
   }, [editor, editorRef]);
 
-  // Only call setContent when switching to a completely different project
+  // Sync external content update if changed outside the editor
   useEffect(() => {
-    if (!editor) return;
-    if (projectId && projectId !== currentProjectIdRef.current) {
-      currentProjectIdRef.current = projectId;
-      editor.commands.setContent(content || '', { emitUpdate: false });
+    if (!editor || content === undefined) return;
+
+    const isProjectSwitch =
+      projectId !== undefined &&
+      lastProjectIdRef.current !== undefined &&
+      projectId !== lastProjectIdRef.current;
+
+    if (projectId !== undefined) {
+      lastProjectIdRef.current = projectId;
     }
-  }, [projectId, content, editor]);
 
-  // Handle explicit external restore triggers (e.g. restoring version snapshots or accepting AI diff proposals)
-  useEffect(() => {
-    if (!editor) return;
-    if (restoreTrigger !== undefined && restoreTrigger !== prevRestoreTriggerRef.current) {
-      prevRestoreTriggerRef.current = restoreTrigger;
-      editor.commands.setContent(content || '', { emitUpdate: false });
+    const currentHtml = editor.getHTML();
+    const incomingNorm = normalizeEditorHtml(content);
+    const currentNorm = normalizeEditorHtml(currentHtml);
+
+    if (isProjectSwitch) {
+      lastLocalHtmlRef.current = content;
+      recentLocalEmissionsRef.current = new Set([content, incomingNorm]);
+      if (content !== currentHtml) {
+        editor.commands.setContent(content, { emitUpdate: false });
+      }
+      return;
     }
-  }, [restoreTrigger, content, editor]);
 
-  // Listen for explicit external restore custom events
-  useEffect(() => {
-    if (!editor) return;
-    const handleRestoreEvent = (e: CustomEvent<{ content: string; projectId?: string }>) => {
-      if (e.detail?.projectId && projectId && e.detail.projectId !== projectId) {
-        return;
-      }
-      if (typeof e.detail?.content === 'string') {
-        editor.commands.setContent(e.detail.content, { emitUpdate: false });
-      }
-    };
+    // 1. If incoming content is already equivalent to the live editor document
+    // (raw match or normalized match), preserve the live ProseMirror document and cursor.
+    const isBothEmpty =
+      editor.getText().trim() === '' &&
+      !currentHtml.includes('<img') &&
+      incomingNorm === '<p></p>';
 
-    window.addEventListener('sog:restore-editor-content' as any, handleRestoreEvent as any);
-    return () => {
-      window.removeEventListener('sog:restore-editor-content' as any, handleRestoreEvent as any);
-    };
-  }, [editor, projectId]);
+    if (content === currentHtml || incomingNorm === currentNorm || isBothEmpty) {
+      // React state / autosave has caught up to the live editor document;
+      // prune older intermediate emissions so legitimate external restores to earlier states still apply.
+      lastLocalHtmlRef.current = currentHtml;
+      recentLocalEmissionsRef.current = new Set([
+        content,
+        incomingNorm,
+        currentHtml,
+        currentNorm,
+      ]);
+      return;
+    }
+
+    // 2. If incoming content is an earlier in-flight local update emitted by this editor
+    // (e.g. user continued typing while React state or debounced autosave was catching up),
+    // ignore the stale echo so we never overwrite newer local edits or jump the cursor.
+    if (
+      recentLocalEmissionsRef.current.has(content) ||
+      recentLocalEmissionsRef.current.has(incomingNorm)
+    ) {
+      return;
+    }
+
+    // 3. Otherwise, this is a genuine external document replacement
+    // (e.g. AI edit accepted, link/citation inserted, review/QC fix applied, version restored, or newer remote sync).
+    lastLocalHtmlRef.current = content;
+    recentLocalEmissionsRef.current = new Set([content, incomingNorm]);
+    editor.commands.setContent(content, { emitUpdate: false });
+  }, [content, projectId, editor]);
 
   // Close menus on outside click
   useEffect(() => {
@@ -273,6 +351,40 @@ export const Editor: React.FC<EditorProps> = ({
     }
   };
 
+  // Automatic URL metadata title fetching when URL is entered/pasted
+  useEffect(() => {
+    if (!isLinkPromptOpen) return;
+    const trimmedUrl = linkUrl.trim();
+    if (!trimmedUrl || hasUserEditedTitle) return;
+
+    let targetUrl = trimmedUrl;
+    if (!/^https?:\/\//i.test(targetUrl) && !/^mailto:/i.test(targetUrl)) {
+      targetUrl = `https://${targetUrl}`;
+    }
+
+    if (!isValidUrl(targetUrl)) return;
+
+    let isMounted = true;
+    const timer = setTimeout(async () => {
+      setIsFetchingTitle(true);
+      try {
+        const res = await fetchLinkMetadata(targetUrl);
+        if (isMounted && res.ok && res.metadata?.title && !hasUserEditedTitle) {
+          setLinkTitle(res.metadata.title);
+        }
+      } catch (err) {
+        console.warn('URL title fetch error:', err);
+      } finally {
+        if (isMounted) setIsFetchingTitle(false);
+      }
+    }, 500);
+
+    return () => {
+      isMounted = false;
+      clearTimeout(timer);
+    };
+  }, [linkUrl, isLinkPromptOpen, hasUserEditedTitle]);
+
   // Link handling
   const handleToggleLink = () => {
     if (editor.isActive('link')) {
@@ -280,20 +392,30 @@ export const Editor: React.FC<EditorProps> = ({
       setIsLinkPromptOpen(false);
       return;
     }
-    const previousUrl = editor.getAttributes('link').href || '';
+    const linkAttrs = editor.getAttributes('link');
+    const previousUrl = linkAttrs.href || '';
+    const previousTarget = linkAttrs.target === '_blank' ? '_blank' : '_self';
+    const previousTitle = linkAttrs.title || '';
+
     const { from, to } = editor.state.selection;
     const currentSelectedText = editor.state.doc.textBetween(from, to, ' ').trim();
 
     setLinkUrl(previousUrl);
     setLinkDisplayText(currentSelectedText);
+    setLinkTitle(previousTitle);
+    setLinkTarget(previousTarget);
+    setHasUserEditedTitle(Boolean(previousTitle));
     setIsLinkPromptOpen(true);
   };
 
   const handleSelectLibraryLink = (linkId: string) => {
-    const libraryLinks = storage.getInternalLinks().filter((l) => l.active);
-    const found = libraryLinks.find((l) => l.id === linkId);
+    const libraryLinks = storage.getInternalLinks().filter((l: InternalLink) => l.active);
+    const found = libraryLinks.find((l: InternalLink) => l.id === linkId);
     if (found) {
       setLinkUrl(cleanTrackingParameters(found.url));
+      if (!hasUserEditedTitle) {
+        setLinkTitle(found.title);
+      }
       if (!linkDisplayText && found.preferredAnchor) {
         setLinkDisplayText(found.preferredAnchor);
       } else if (!linkDisplayText) {
@@ -314,20 +436,33 @@ export const Editor: React.FC<EditorProps> = ({
 
       const { from, to } = editor.state.selection;
       const currentSelection = editor.state.doc.textBetween(from, to, ' ').trim();
+      const finalTitle = linkTitle.trim();
+      const targetAttr = linkTarget;
 
       if (linkDisplayText.trim() && linkDisplayText.trim() !== currentSelection) {
+        const titlePart = finalTitle ? ` title="${escapeHtmlAttr(finalTitle)}"` : '';
+        const targetPart = targetAttr === '_blank' ? ' target="_blank" rel="noopener noreferrer"' : ' target="_self"';
+        const linkHtml = `<a href="${url}"${targetPart}${titlePart}>${escapeHtml(linkDisplayText.trim())}</a>`;
+        editor.chain().focus().insertContent(linkHtml).run();
+      } else {
         editor
           .chain()
           .focus()
-          .insertContent(`<a href="${url}" target="_blank" rel="noopener noreferrer">${linkDisplayText.trim()}</a>`)
+          .extendMarkRange('link')
+          .setLink({
+            href: url,
+            target: targetAttr,
+            title: finalTitle || undefined,
+          })
           .run();
-      } else {
-        editor.chain().focus().setLink({ href: url }).run();
       }
     }
     setIsLinkPromptOpen(false);
     setLinkUrl('');
     setLinkDisplayText('');
+    setLinkTitle('');
+    setLinkTarget('_self');
+    setHasUserEditedTitle(false);
   };
 
   // AI Actions Trigger
@@ -546,7 +681,7 @@ export const Editor: React.FC<EditorProps> = ({
                 </div>
 
                 {/* Library Quick Select */}
-                {storage.getInternalLinks().filter((l) => l.active).length > 0 && (
+                {storage.getInternalLinks().filter((l: InternalLink) => l.active).length > 0 && (
                   <div className="space-y-1">
                     <label className="text-[10px] font-bold uppercase tracking-wider text-[#736c61]">
                       Quick Select from Internal Library
@@ -559,7 +694,7 @@ export const Editor: React.FC<EditorProps> = ({
                       className="w-full text-xs px-2.5 py-1.5 bg-[#faf9f6] border border-[#dcd6ca] rounded-md text-[#1e232a] focus:outline-hidden"
                     >
                       <option value="">Choose an existing article...</option>
-                      {storage.getInternalLinks().filter((l) => l.active).map((l) => (
+                      {storage.getInternalLinks().filter((l: InternalLink) => l.active).map((l: InternalLink) => (
                         <option key={l.id} value={l.id}>
                           {l.title} ({l.category})
                         </option>
@@ -594,6 +729,31 @@ export const Editor: React.FC<EditorProps> = ({
                   />
                 </div>
 
+                {/* Link Title Input */}
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[10px] font-bold uppercase tracking-wider text-[#736c61] flex items-center gap-1.5">
+                      <span>Link Title</span>
+                      {isFetchingTitle && (
+                        <span className="text-[10px] text-amber-800 font-normal italic flex items-center gap-1">
+                          <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                          <span>Fetching title...</span>
+                        </span>
+                      )}
+                    </label>
+                  </div>
+                  <input
+                    type="text"
+                    value={linkTitle}
+                    onChange={(e) => {
+                      setLinkTitle(e.target.value);
+                      setHasUserEditedTitle(true);
+                    }}
+                    placeholder="Page title (auto-populated when available)..."
+                    className="w-full text-xs px-2.5 py-1.5 rounded-md border border-[#dcd6ca] bg-white focus:outline-hidden focus:border-blue-600"
+                  />
+                </div>
+
                 {/* Display Text Input */}
                 <div className="space-y-1">
                   <label className="text-[10px] font-bold uppercase tracking-wider text-[#736c61]">
@@ -606,6 +766,21 @@ export const Editor: React.FC<EditorProps> = ({
                     placeholder="Anchor text in sentence..."
                     className="w-full text-xs px-2.5 py-1.5 rounded-md border border-[#dcd6ca] bg-white focus:outline-hidden focus:border-blue-600"
                   />
+                </div>
+
+                {/* Target Selector */}
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold uppercase tracking-wider text-[#736c61]">
+                    Open Link In
+                  </label>
+                  <select
+                    value={linkTarget}
+                    onChange={(e) => setLinkTarget(e.target.value as '_self' | '_blank')}
+                    className="w-full text-xs px-2.5 py-1.5 rounded-md border border-[#dcd6ca] bg-white focus:outline-hidden focus:border-blue-600 font-medium cursor-pointer"
+                  >
+                    <option value="_self">Same window/tab (_self)</option>
+                    <option value="_blank">New window/tab (_blank)</option>
+                  </select>
                 </div>
 
                 {/* Popover Buttons */}

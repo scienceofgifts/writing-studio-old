@@ -54,7 +54,6 @@ export const ConfirmationModal: React.FC<ConfirmationModalProps> = ({
       aria-modal="true"
       aria-labelledby="confirm-dialog-title"
       className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-2xs animate-fade-in"
-      onClick={onCancel}
     >
       <div
         className="w-full max-w-md bg-white border border-[#e5dfd3] rounded-2xl shadow-xl p-4 sm:p-6 space-y-4 sm:space-y-5"

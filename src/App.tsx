@@ -40,7 +40,7 @@ import { VersionHistoryDrawer } from './components/drawers/VersionHistoryDrawer'
 import { LinkOpportunity } from './types/internalLink';
 import { ReviewFinding, EditorialReviewResult, QCResult, QCFinding } from './types/project';
 import { createVersionSnapshot } from './services/versionHistoryService';
-import { ensureSemanticHtml } from './utils/richText';
+import { ensureSemanticHtml, isEquivalentEditorHtml } from './utils/richText';
 import { applyHyperlinkToHtml, isValidUrl, isUrlAlreadyInDocument } from './utils/urlUtils';
 import { applyTheme } from './theme/tokens';
 import { useDocumentSearch } from './utils/useDocumentSearch';
@@ -63,27 +63,48 @@ export default function App() {
   // Initialize theme tokens and IndexedDB persistence engine on mount
   useEffect(() => {
     applyTheme(storage.getTheme());
+
+    const syncProjectsFromStorage = () => {
+      setProjects((prev) => {
+        const nextFromStorage = storage.getProjects();
+        let changed = prev.length !== nextFromStorage.length;
+        const merged = nextFromStorage.map((np, idx) => {
+          const existing = prev.find((ep) => ep.id === np.id);
+          if (!existing) {
+            changed = true;
+            return np;
+          }
+          const existingTime = new Date(existing.updatedAt || 0).getTime();
+          const nextTime = new Date(np.updatedAt || 0).getTime();
+          // Never allow storage or remote sync to overwrite a newer in-memory local edit
+          if (existingTime > nextTime) {
+            return existing;
+          }
+          // When autosave finishes persisting the current in-memory state, preserve object reference
+          if (
+            existingTime === nextTime &&
+            existing.title === np.title &&
+            existing.status === np.status &&
+            isEquivalentEditorHtml(existing.content, np.content)
+          ) {
+            if (prev[idx]?.id !== np.id) changed = true;
+            return existing;
+          }
+          changed = true;
+          return np;
+        });
+        return changed ? merged : prev;
+      });
+    };
+
     storage.init().then(() => {
-      setProjects(storage.getProjects());
+      syncProjectsFromStorage();
       const activeId = storage.getActiveProjectId();
       if (activeId) setActiveProjectId(activeId);
     });
 
-    const unsubscribe = storage.subscribe(() => {
-      setProjects(storage.getProjects());
-    });
-
-    const handleCrossTabStorage = (e: StorageEvent) => {
-      if (e.key === 'sog_writing_projects_v2' && e.newValue) {
-        setProjects(storage.getProjects());
-      }
-    };
-    window.addEventListener('storage', handleCrossTabStorage);
-
-    return () => {
-      unsubscribe();
-      window.removeEventListener('storage', handleCrossTabStorage);
-    };
+    const unsubscribe = storage.subscribe(syncProjectsFromStorage);
+    return unsubscribe;
   }, []);
 
   // Single source of truth for mutually exclusive writing panels
@@ -137,8 +158,16 @@ export default function App() {
   const autosaveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const handleUpdateActiveProject = useCallback((updatedProject: WritingProject) => {
+    const prevTime = new Date(updatedProject.updatedAt || 0).getTime();
+    const nowTime = Math.max(Date.now(), prevTime + 1);
+    const stampedProject: WritingProject = {
+      ...updatedProject,
+      updatedAt: new Date(nowTime).toISOString(),
+    };
+
+    storage.stagePendingProject(stampedProject);
     setSaveStatus('unsaved');
-    setProjects((prev) => prev.map((p) => (p.id === updatedProject.id ? updatedProject : p)));
+    setProjects((prev) => prev.map((p) => (p.id === stampedProject.id ? stampedProject : p)));
 
     if (autosaveTimeoutRef.current) {
       clearTimeout(autosaveTimeoutRef.current);
@@ -147,7 +176,7 @@ export default function App() {
     autosaveTimeoutRef.current = setTimeout(() => {
       setSaveStatus('saving');
       try {
-        storage.saveProject(updatedProject, { isAutosave: true, silent: true });
+        storage.saveProject(stampedProject);
         setTimeout(() => {
           setSaveStatus('saved');
         }, 250);
@@ -162,6 +191,10 @@ export default function App() {
   // Immediate manual save
   const handleManualSave = useCallback(() => {
     if (!activeProject) return;
+    if (autosaveTimeoutRef.current) {
+      clearTimeout(autosaveTimeoutRef.current);
+      autosaveTimeoutRef.current = null;
+    }
     setSaveStatus('saving');
     try {
       storage.saveProject(activeProject);
@@ -180,17 +213,35 @@ export default function App() {
     handleManualSave();
   }, [activeProject, handleManualSave]);
 
-  // Warn before unload if unsaved
+  // Flush pending unsaved edits on pagehide/beforeunload
   useEffect(() => {
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
-      if (saveStatus === 'unsaved' || saveStatus === 'saving') {
+      let flushFailed = false;
+      try {
+        storage.flushPendingProjects();
+      } catch (err) {
+        flushFailed = true;
+        console.warn('Could not flush pending projects on unload:', err);
+      }
+      if (flushFailed || saveStatus === 'error') {
         e.preventDefault();
         e.returnValue = 'You have unsaved changes in your document. Are you sure you want to leave?';
         return e.returnValue;
       }
     };
+    const handlePageHide = () => {
+      try {
+        storage.flushPendingProjects();
+      } catch (err) {
+        console.warn('Could not flush pending projects on pagehide:', err);
+      }
+    };
     window.addEventListener('beforeunload', handleBeforeUnload);
-    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+    window.addEventListener('pagehide', handlePageHide);
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      window.removeEventListener('pagehide', handlePageHide);
+    };
   }, [saveStatus]);
 
   // Global Keyboard Shortcuts (Phase 10, Part D)
@@ -428,15 +479,6 @@ export default function App() {
       newContent = `${activeProject.content}\n${ensureSemanticHtml(proposal.proposedText)}`;
     }
 
-    if (editorRef.current) {
-      editorRef.current.commands.setContent(newContent, { emitUpdate: false });
-    }
-    window.dispatchEvent(
-      new CustomEvent('sog:restore-editor-content', {
-        detail: { content: newContent, projectId: activeProject.id },
-      })
-    );
-
     handleUpdateActiveProject({
       ...activeProject,
       content: newContent,
@@ -489,15 +531,6 @@ export default function App() {
 
     const updatedOpportunities = (activeProject.linkOpportunities || []).map((o) =>
       o.id === opp.id ? { ...o, status: 'accepted' as const } : o
-    );
-
-    if (editorRef.current) {
-      editorRef.current.commands.setContent(res.updatedHtml, { emitUpdate: false });
-    }
-    window.dispatchEvent(
-      new CustomEvent('sog:restore-editor-content', {
-        detail: { content: res.updatedHtml, projectId: activeProject.id },
-      })
     );
 
     handleUpdateActiveProject({
@@ -555,15 +588,6 @@ export default function App() {
 
     const updatedOpportunities = (activeProject.linkOpportunities || []).map((o) =>
       insertedIds.includes(o.id) ? { ...o, status: 'accepted' as const } : o
-    );
-
-    if (editorRef.current) {
-      editorRef.current.commands.setContent(currentHtml, { emitUpdate: false });
-    }
-    window.dispatchEvent(
-      new CustomEvent('sog:restore-editor-content', {
-        detail: { content: currentHtml, projectId: activeProject.id },
-      })
     );
 
     handleUpdateActiveProject({
@@ -652,15 +676,6 @@ export default function App() {
           mode: 'full',
         };
 
-    if (editorRef.current) {
-      editorRef.current.commands.setContent(newContent, { emitUpdate: false });
-    }
-    window.dispatchEvent(
-      new CustomEvent('sog:restore-editor-content', {
-        detail: { content: newContent, projectId: activeProject.id },
-      })
-    );
-
     handleUpdateActiveProject({
       ...activeProject,
       content: newContent,
@@ -690,15 +705,6 @@ export default function App() {
         pendingFindings.some((p) => p.id === f.id) ? { ...f, status: 'accepted' as const } : f
       ),
     };
-
-    if (editorRef.current) {
-      editorRef.current.commands.setContent(currentHtml, { emitUpdate: false });
-    }
-    window.dispatchEvent(
-      new CustomEvent('sog:restore-editor-content', {
-        detail: { content: currentHtml, projectId: activeProject.id },
-      })
-    );
 
     handleUpdateActiveProject({
       ...activeProject,
@@ -788,15 +794,6 @@ export default function App() {
           findings: [finding],
           categoryChecks: [],
         };
-
-    if (editorRef.current) {
-      editorRef.current.commands.setContent(newContent, { emitUpdate: false });
-    }
-    window.dispatchEvent(
-      new CustomEvent('sog:restore-editor-content', {
-        detail: { content: newContent, projectId: activeProject.id },
-      })
-    );
 
     handleUpdateActiveProject({
       ...activeProject,

@@ -31,12 +31,9 @@ import {
   ShieldCheck,
   ClipboardCheck,
   History,
-  Cpu,
   Lightbulb,
   Database,
 } from 'lucide-react';
-import { getModelDefinition } from '../services/modelRegistry';
-import { storage } from '../services/storage';
 import { CloudSyncBar } from './CloudSyncBar';
 
 interface NavigationProps {
@@ -815,40 +812,6 @@ export const Navigation: React.FC<NavigationProps> = ({
               <div className="px-2.5 py-0.5 bg-white/80 border border-[#dcd6ca] rounded-md shadow-2xs shrink-0 select-none">
                 {getSaveIndicator()}
               </div>
-
-              {/* Active AI Model Indicator */}
-              {(() => {
-                const globalDefaultId = storage.getGlobalModel();
-                const activeModelId = activeProject.modelOverride || globalDefaultId;
-                const activeDef = getModelDefinition(activeModelId);
-                const isOverridden = Boolean(activeProject.modelOverride);
-
-                return (
-                  <button
-                    type="button"
-                    onClick={() => handlePanelToggle('controls')}
-                    className={`px-2 py-0.5 rounded-md text-xs transition-all inline-flex items-center gap-1 border select-none shadow-2xs shrink-0 ${
-                      isOverridden
-                        ? 'bg-indigo-50 border-indigo-200 text-indigo-950 font-medium hover:bg-indigo-100/80'
-                        : 'bg-white/80 border-[#dcd6ca] text-[#4a443b] hover:bg-white hover:text-[#1e232a]'
-                    }`}
-                    title={
-                      isOverridden
-                        ? `AI Model: ${activeDef.displayName} (Project Override) — Click to configure`
-                        : `AI Model: ${activeDef.displayName} (Using Global Default) — Click to configure`
-                    }
-                  >
-                    <Cpu className={`w-3.5 h-3.5 ${isOverridden ? 'text-indigo-600' : 'text-[#8c8477]'}`} />
-                    <span className="hidden md:inline text-[11px] text-[#736c61]">AI:</span>
-                    <span className="font-semibold text-xs">{activeDef.displayName}</span>
-                    {isOverridden && (
-                      <span className="text-[9px] px-1 py-0.2 rounded-xs bg-indigo-200/80 text-indigo-950 font-bold uppercase tracking-wider">
-                        Override
-                      </span>
-                    )}
-                  </button>
-                );
-              })()}
 
               <span className="text-[#c7bfaf] select-none shrink-0 hidden lg:inline">•</span>
 

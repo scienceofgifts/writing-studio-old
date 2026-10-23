@@ -19,7 +19,6 @@ import {
   ArticleMetadata,
 } from '../../types/project';
 import { Editor } from '../Editor';
-import { AiCommandBar } from '../AiCommandBar';
 import { geminiService } from '../../services/geminiClient';
 import { toastService } from '../../services/toastService';
 import {
@@ -218,13 +217,17 @@ export const ArticleWorkspace: React.FC<ArticleWorkspaceProps> = ({
     action: string,
     customCommand?: string,
     scope: any = 'selection',
-    targetOutlineItem?: OutlineItem
+    targetOutlineItem?: OutlineItem,
+    explicitSelectedText?: string,
+    explicitRange?: { start: number; end: number }
   ) => {
     setIsLoading(true);
     try {
-      const isSelectionScope = scope === 'selection' && Boolean(selectedText);
+      const effectiveText = explicitSelectedText !== undefined ? explicitSelectedText : selectedText;
+      const effectiveRange = explicitRange !== undefined ? explicitRange : selectionRange;
+      const isSelectionScope = scope === 'selection' && Boolean(effectiveText);
       const res = await geminiService.executeAction(project, action, {
-        selectedText: isSelectionScope ? selectedText : undefined,
+        selectedText: isSelectionScope ? effectiveText : undefined,
         scope,
         customCommand,
         targetOutlineItem,
@@ -235,13 +238,13 @@ export const ArticleWorkspace: React.FC<ArticleWorkspaceProps> = ({
           id: `prop-${Date.now()}`,
           scopeDescription:
             isSelectionScope
-              ? `Selected text (${selectedText.split(/\s+/).filter(Boolean).length} words)`
+              ? `Selected text (${effectiveText.split(/\s+/).filter(Boolean).length} words)`
               : formatActionScopeDescription(action, targetOutlineItem),
-          targetText: isSelectionScope ? selectedText : '',
+          targetText: isSelectionScope ? effectiveText : '',
           proposedText: res.proposedText,
           explanation: res.explanation,
           modelUsed: res.modelUsed,
-          range: isSelectionScope ? selectionRange : undefined,
+          range: isSelectionScope ? effectiveRange : undefined,
           mode: isSelectionScope ? 'replace_selection' : 'insert',
         });
       }
@@ -942,7 +945,7 @@ export const ArticleWorkspace: React.FC<ArticleWorkspaceProps> = ({
       </div>
 
       {/* Main Dominant Writing Canvas */}
-      <div className="flex-1 overflow-y-auto p-2 sm:p-4 md:p-8 flex flex-col">
+      <div className="flex-1 min-h-0 overflow-y-auto p-2 sm:p-4 md:p-8 flex flex-col">
         {project.editorialDevelopment?.originalIdea && !project.editorialDevelopment?.brief && (
           <div className="mb-4 mx-auto max-w-3xl w-full bg-[#f6f3eb] border border-[#ded7ca] rounded-xl p-3 sm:p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs animate-in fade-in duration-100 shadow-2xs">
             <div className="flex items-start sm:items-center gap-2.5 min-w-0 flex-1">
@@ -982,19 +985,10 @@ export const ArticleWorkspace: React.FC<ArticleWorkspaceProps> = ({
           onExplicitAiAction={(action, text, range) => {
             setSelectedText(text);
             if (range) setSelectionRange(range);
-            handleExecuteAiAction(action, undefined, text ? 'selection' : 'all');
+            handleExecuteAiAction(action, undefined, text ? 'selection' : 'all', undefined, text, range);
           }}
         />
       </div>
-
-      {/* Explicit AI Command Bar */}
-      <AiCommandBar
-        selectedText={selectedText}
-        isLoading={isLoading}
-        onExecuteCommand={(command, scope) =>
-          handleExecuteAiAction('custom_command', command, scope)
-        }
-      />
 
       {/* Article Details & Metadata Drawer */}
       <ArticleInfoDrawer

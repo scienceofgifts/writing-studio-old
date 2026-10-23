@@ -45,25 +45,9 @@ const STORAGE_KEY_RESEARCH_STUDIES = 'sog_research_studies_v1';
 const STORAGE_KEY_RESEARCH_CLAIMS = 'sog_research_claims_v1';
 const STORAGE_KEY_RESEARCH_FILES = 'sog_research_files_v1';
 const STORAGE_KEY_LAST_BACKUP = 'sog_last_backup_timestamp_v1';
-const STORAGE_KEY_SEEDS_INITIALIZED = 'sog_seeds_initialized_v1';
-
-export function areSeedsInitialized(): boolean {
-  try {
-    return localStorage.getItem(STORAGE_KEY_SEEDS_INITIALIZED) === 'true';
-  } catch {
-    return false;
-  }
-}
-
-export function markSeedsInitialized(): void {
-  try {
-    localStorage.setItem(STORAGE_KEY_SEEDS_INITIALIZED, 'true');
-  } catch (e) {
-    console.warn('Failed to mark seeds initialized:', e);
-  }
-}
 
 const storageListeners = new Set<() => void>();
+const pendingLocalProjects = new Map<string, WritingProject>();
 
 function mergeWithTombstones<T extends { id: string; updatedAt?: string; deletedAt?: string; _isDeleted?: boolean }>(
   localRaw: T[],
@@ -79,26 +63,6 @@ function mergeWithTombstones<T extends { id: string; updatedAt?: string; deleted
     if (!local) {
       mergedMap.set(remote.id, remote);
     } else {
-      // Local deletion wins unless remote updatedAt is strictly newer than local deletedAt
-      if (local._isDeleted) {
-        const localDeletedTime = new Date(local.deletedAt || local.updatedAt || 0).getTime();
-        const remoteUpdatedTime = new Date(remote.updatedAt || 0).getTime();
-        if (remoteUpdatedTime <= localDeletedTime) {
-          mergedMap.set(remote.id, local);
-          return;
-        }
-      }
-
-      // Remote deletion wins unless local updatedAt is strictly newer than remote deletedAt
-      if (remote._isDeleted) {
-        const remoteDeletedTime = new Date(remote.deletedAt || remote.updatedAt || 0).getTime();
-        const localUpdatedTime = new Date(local.updatedAt || 0).getTime();
-        if (localUpdatedTime <= remoteDeletedTime) {
-          mergedMap.set(remote.id, remote);
-          return;
-        }
-      }
-
       const localTime = new Date(local.updatedAt || (local as any).deletedAt || 0).getTime();
       const remoteTime = new Date(remote.updatedAt || (remote as any).deletedAt || 0).getTime();
 
@@ -663,124 +627,141 @@ const SEED_PROJECTS: WritingProject[] = [
 
 export const storage = {
   getRawProjectsIncludingDeleted(): WritingProject[] {
-    const initialized = areSeedsInitialized();
     try {
       const stored = localStorage.getItem(STORAGE_KEY_PROJECTS);
-      if (stored !== null) {
+      if (stored) {
         const parsed: WritingProject[] = JSON.parse(stored);
-        if (Array.isArray(parsed)) {
-          const mapped: WritingProject[] = parsed.map((p): WritingProject => {
-            const controls = p.writingControls || p.aiSettings || { ...DEFAULT_WRITING_CONTROLS };
-            const normalizedControls: WritingControls = {
-              ...DEFAULT_WRITING_CONTROLS,
-              ...controls,
-            };
-            let giftGuideMeta = p.giftGuideMeta;
-            if (p.type === 'gift_guide') {
-              giftGuideMeta = {
-                ...DEFAULT_GIFT_GUIDE_METADATA,
-                ...(p.giftGuideMeta || {}),
-                settings: {
-                  ...DEFAULT_GUIDE_SETTINGS,
-                  ...(p.giftGuideMeta?.settings || {}),
-                },
-                products: p.giftGuideMeta?.products || [],
-                faqList: p.giftGuideMeta?.faqList || [],
-              };
-            }
-
-            let articleMeta = p.articleMeta;
-            if (p.type === 'article') {
-              const seed = SEED_PROJECTS.find((s) => s.id === p.id);
-              const defaultSlug = (p.title || 'untitled-article')
-                .toLowerCase()
-                .replace(/[^a-z0-9]+/g, '-')
-                .replace(/(^-|-$)/g, '');
-              articleMeta = {
-                slug: defaultSlug,
-                seoTitle: p.title ? `${p.title} | Science of Gifts` : '',
-                metaDescription: '',
-                standfirst: '',
-                category: 'Product & Craft Advice',
-                author: {
-                  name: 'Science of Gifts Editorial',
-                  role: 'Staff Writer',
-                },
-                targetKeyword: '',
-                secondaryKeywords: [],
-                audience: p.brief?.audience || 'Thoughtful gifters & readers',
-                searchIntent: 'Editorial insight & advice',
-                tags: [],
-                sources: [],
-                relatedContent: [],
-                ...(seed?.articleMeta || {}),
-                ...(p.articleMeta || {}),
-              };
-            }
-
-            return {
-              ...p,
-              content: ensureSemanticHtml(p.content),
-              writingControls: normalizedControls,
-              aiSettings: normalizedControls,
-              brief: {
-                ...DEFAULT_BRIEF,
-                ...(p.brief || {}),
+        const mapped: WritingProject[] = parsed.map((p): WritingProject => {
+          const controls = p.writingControls || p.aiSettings || { ...DEFAULT_WRITING_CONTROLS };
+          const normalizedControls: WritingControls = {
+            ...DEFAULT_WRITING_CONTROLS,
+            ...controls,
+          };
+          let giftGuideMeta = p.giftGuideMeta;
+          if (p.type === 'gift_guide') {
+            giftGuideMeta = {
+              ...DEFAULT_GIFT_GUIDE_METADATA,
+              ...(p.giftGuideMeta || {}),
+              settings: {
+                ...DEFAULT_GUIDE_SETTINGS,
+                ...(p.giftGuideMeta?.settings || {}),
               },
-              outline: p.outline || [],
-              contentRules: p.contentRules || [...DEFAULT_CONTENT_RULES],
-              projectInstructions: p.projectInstructions || '',
-              giftGuideMeta,
-              articleMeta,
+              products: p.giftGuideMeta?.products || [],
+              faqList: p.giftGuideMeta?.faqList || [],
             };
-          });
-
-          // Only seed if seeds have never been initialized before
-          if (!initialized) {
-            markSeedsInitialized();
-            const existingIds = new Set(mapped.map((p) => p.id));
-            let added = false;
-            for (const seed of SEED_PROJECTS) {
-              if (!existingIds.has(seed.id)) {
-                mapped.push({
-                  ...seed,
-                  writingControls: { ...DEFAULT_WRITING_CONTROLS, ...seed.aiSettings },
-                  aiSettings: { ...DEFAULT_WRITING_CONTROLS, ...seed.aiSettings },
-                } as WritingProject);
-                added = true;
-              }
-            }
-            if (added) {
-              this.saveRawProjects(mapped, { silent: true });
-            }
           }
 
-          return mapped;
+          let articleMeta = p.articleMeta;
+          if (p.type === 'article') {
+            const seed = SEED_PROJECTS.find((s) => s.id === p.id);
+            const defaultSlug = (p.title || 'untitled-article')
+              .toLowerCase()
+              .replace(/[^a-z0-9]+/g, '-')
+              .replace(/(^-|-$)/g, '');
+            articleMeta = {
+              slug: defaultSlug,
+              seoTitle: p.title ? `${p.title} | Science of Gifts` : '',
+              metaDescription: '',
+              standfirst: '',
+              category: 'Product & Craft Advice',
+              author: {
+                name: 'Science of Gifts Editorial',
+                role: 'Staff Writer',
+              },
+              targetKeyword: '',
+              secondaryKeywords: [],
+              audience: p.brief?.audience || 'Thoughtful gifters & readers',
+              searchIntent: 'Editorial insight & advice',
+              tags: [],
+              sources: [],
+              relatedContent: [],
+              ...(seed?.articleMeta || {}),
+              ...(p.articleMeta || {}),
+            };
+          }
+
+          return {
+            ...p,
+            content: ensureSemanticHtml(p.content),
+            writingControls: normalizedControls,
+            aiSettings: normalizedControls,
+            brief: {
+              ...DEFAULT_BRIEF,
+              ...(p.brief || {}),
+            },
+            outline: p.outline || [],
+            contentRules: p.contentRules || [...DEFAULT_CONTENT_RULES],
+            projectInstructions: p.projectInstructions || '',
+            giftGuideMeta,
+            articleMeta,
+          };
+        });
+
+        // Ensure new seed projects (e.g. teacher appreciation and viking articles) are available
+        const existingIds = new Set(mapped.map((p) => p.id));
+        let added = false;
+        for (const seed of SEED_PROJECTS) {
+          if (!existingIds.has(seed.id)) {
+            mapped.push({
+              ...seed,
+              writingControls: { ...DEFAULT_WRITING_CONTROLS, ...seed.aiSettings },
+              aiSettings: { ...DEFAULT_WRITING_CONTROLS, ...seed.aiSettings },
+            } as WritingProject);
+            added = true;
+          }
         }
+        if (added) {
+          this.saveRawProjects(mapped);
+        }
+
+        if (pendingLocalProjects.size > 0) {
+          for (let i = 0; i < mapped.length; i++) {
+            const pending = pendingLocalProjects.get(mapped[i].id);
+            if (pending) {
+              const pendingTime = new Date(pending.updatedAt || 0).getTime();
+              const storedTime = new Date(mapped[i].updatedAt || 0).getTime();
+              if (pendingTime >= storedTime) {
+                mapped[i] = {
+                  ...mapped[i],
+                  ...pending,
+                  content: ensureSemanticHtml(pending.content),
+                };
+              }
+            }
+          }
+        }
+
+        return mapped;
       }
     } catch (e) {
       console.warn('Failed to read projects from localStorage:', e);
     }
+    const seeded: WritingProject[] = SEED_PROJECTS.map((p) => ({
+      ...p,
+      writingControls: { ...DEFAULT_WRITING_CONTROLS, ...p.aiSettings },
+      aiSettings: { ...DEFAULT_WRITING_CONTROLS, ...p.aiSettings },
+    }) as WritingProject);
+    this.saveRawProjects(seeded);
+    return seeded;
+  },
 
-    if (!initialized) {
-      markSeedsInitialized();
-      const seeded: WritingProject[] = SEED_PROJECTS.map((p) => ({
-        ...p,
-        writingControls: { ...DEFAULT_WRITING_CONTROLS, ...p.aiSettings },
-        aiSettings: { ...DEFAULT_WRITING_CONTROLS, ...p.aiSettings },
-      }) as WritingProject);
-      this.saveRawProjects(seeded, { silent: true });
-      return seeded;
+  stagePendingProject(project: WritingProject): void {
+    pendingLocalProjects.set(project.id, project);
+  },
+
+  flushPendingProjects(): void {
+    if (pendingLocalProjects.size === 0) return;
+    const pendingList = Array.from(pendingLocalProjects.values());
+    for (const proj of pendingList) {
+      this.saveProject(proj);
     }
-
-    return [];
   },
 
   getProjects(): WritingProject[] {
     return this.getRawProjectsIncludingDeleted().filter((p) => !p._isDeleted);
   },
 
-  saveRawProjects(projects: WritingProject[], options?: { silent?: boolean }): void {
+  saveRawProjects(projects: WritingProject[]): void {
     try {
       localStorage.setItem(STORAGE_KEY_PROJECTS, JSON.stringify(projects));
     } catch (e) {
@@ -789,9 +770,7 @@ export const storage = {
     indexedDBService.putMany(STORES.PROJECTS, projects).catch((err) => {
       console.warn('Async IndexedDB saveRawProjects error:', err);
     });
-    if (!options?.silent) {
-      this.notifyListeners();
-    }
+    this.notifyListeners();
   },
 
   saveProjects(projects: WritingProject[]): void {
@@ -812,6 +791,16 @@ export const storage = {
   saveProjectsFromRemote(projects: WritingProject[]): void {
     const localRaw = this.getRawProjectsIncludingDeleted();
     const merged = mergeWithTombstones(localRaw, projects);
+    for (const remote of projects) {
+      const pending = pendingLocalProjects.get(remote.id);
+      if (pending) {
+        const pendingTime = new Date(pending.updatedAt || 0).getTime();
+        const remoteTime = new Date(remote.updatedAt || (remote as any).deletedAt || 0).getTime();
+        if (remoteTime > pendingTime) {
+          pendingLocalProjects.delete(remote.id);
+        }
+      }
+    }
     this.saveRawProjects(merged);
   },
 
@@ -820,36 +809,51 @@ export const storage = {
     return list.find((p) => p.id === id);
   },
 
-  saveProject(project: WritingProject, options?: { isAutosave?: boolean; silent?: boolean }): void {
+  saveProject(project: WritingProject): void {
+    const pending = pendingLocalProjects.get(project.id);
+    let targetProject = project;
+    if (pending) {
+      const pendingTime = new Date(pending.updatedAt || 0).getTime();
+      const projectTime = new Date(project.updatedAt || 0).getTime();
+      if (pendingTime > projectTime) {
+        targetProject = pending;
+      } else {
+        pendingLocalProjects.delete(project.id);
+      }
+    }
     const list = this.getRawProjectsIncludingDeleted();
-    const index = list.findIndex((p) => p.id === project.id);
-    const controls = project.writingControls || project.aiSettings || { ...DEFAULT_WRITING_CONTROLS };
+    const index = list.findIndex((p) => p.id === targetProject.id);
+    const controls =
+      targetProject.writingControls || targetProject.aiSettings || { ...DEFAULT_WRITING_CONTROLS };
     const updated: WritingProject = {
-      ...project,
+      ...targetProject,
       _isDeleted: false,
-      content: ensureSemanticHtml(project.content),
+      content: ensureSemanticHtml(targetProject.content),
       writingControls: controls,
       aiSettings: controls,
-      updatedAt: new Date().toISOString(),
+      updatedAt: targetProject.updatedAt || new Date().toISOString(),
     };
     if (index >= 0) {
       list[index] = updated;
     } else {
       list.unshift(updated);
     }
-    const silent = options?.silent ?? options?.isAutosave ?? false;
-    this.saveRawProjects(list, { silent });
+    this.saveRawProjects(list);
   },
 
   renameProject(id: string, newTitle: string): WritingProject | undefined {
     const list = this.getRawProjectsIncludingDeleted();
     const index = list.findIndex((p) => p.id === id);
     if (index >= 0) {
+      const now = new Date().toISOString();
       list[index] = {
         ...list[index],
         title: newTitle.trim(),
-        updatedAt: new Date().toISOString(),
+        updatedAt: now,
       };
+      if (pendingLocalProjects.has(id)) {
+        pendingLocalProjects.set(id, list[index]);
+      }
       this.saveRawProjects(list);
       return list[index];
     }
@@ -860,11 +864,15 @@ export const storage = {
     const list = this.getRawProjectsIncludingDeleted();
     const index = list.findIndex((p) => p.id === id);
     if (index >= 0) {
+      const now = new Date().toISOString();
       list[index] = {
         ...list[index],
         status,
-        updatedAt: new Date().toISOString(),
+        updatedAt: now,
       };
+      if (pendingLocalProjects.has(id)) {
+        pendingLocalProjects.set(id, list[index]);
+      }
       this.saveRawProjects(list);
       return list[index];
     }
@@ -872,6 +880,7 @@ export const storage = {
   },
 
   deleteProject(id: string): void {
+    pendingLocalProjects.delete(id);
     const localRaw = this.getRawProjectsIncludingDeleted();
     const now = new Date().toISOString();
     const existingIndex = localRaw.findIndex((p) => p.id === id);
@@ -1216,25 +1225,20 @@ export const storage = {
   // STYLE REFERENCE PROFILES (Phase 3)
   // ==========================================
   getRawStyleProfilesIncludingDeleted(): StyleProfile[] {
-    const initialized = areSeedsInitialized();
     try {
       const stored = localStorage.getItem(STORAGE_KEY_STYLE_PROFILES);
-      if (stored !== null) {
+      if (stored) {
         const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed)) {
+        if (Array.isArray(parsed) && parsed.length > 0) {
           return parsed;
         }
       }
     } catch (e) {
       console.warn('Failed to read style profiles from localStorage:', e);
     }
-    if (!initialized) {
-      markSeedsInitialized();
-      const seed = DEFAULT_SEED_STYLE_PROFILES;
-      this.saveRawStyleProfiles(seed, { silent: true });
-      return seed;
-    }
-    return [];
+    const seed = DEFAULT_SEED_STYLE_PROFILES;
+    this.saveRawStyleProfiles(seed);
+    return seed;
   },
 
   getStyleProfiles(): StyleProfile[] {
@@ -1246,7 +1250,7 @@ export const storage = {
     return list.find((p) => p.id === id) || null;
   },
 
-  saveRawStyleProfiles(profiles: StyleProfile[], options?: { silent?: boolean }): void {
+  saveRawStyleProfiles(profiles: StyleProfile[]): void {
     try {
       localStorage.setItem(STORAGE_KEY_STYLE_PROFILES, JSON.stringify(profiles));
     } catch (e) {
@@ -1255,9 +1259,7 @@ export const storage = {
     indexedDBService.putMany(STORES.STYLE_PROFILES, profiles).catch((err) => {
       console.warn('Async IndexedDB saveRawStyleProfiles error:', err);
     });
-    if (!options?.silent) {
-      this.notifyListeners();
-    }
+    this.notifyListeners();
   },
 
   saveStyleProfile(profile: StyleProfile): void {
@@ -1351,13 +1353,15 @@ export const storage = {
   // INTERNAL LINK LIBRARY (Phase 4)
   // ==========================================
   getRawInternalLinksIncludingDeleted(): InternalLink[] {
-    const initialized = areSeedsInitialized();
     try {
       const stored = localStorage.getItem(STORAGE_KEY_INTERNAL_LINKS);
-      if (stored !== null) {
+      if (stored) {
         const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed)) {
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          const existingIds = new Set(parsed.map((l: any) => l.id));
+          const existingUrls = new Set(parsed.map((l: any) => l.url));
           let changed = false;
+
           const migrated = parsed.map((l: any) => {
             if (!l.destinationType) {
               changed = true;
@@ -1369,21 +1373,16 @@ export const storage = {
             return l;
           });
 
-          // Merge seed destinations only on initial run
-          if (!initialized) {
-            markSeedsInitialized();
-            const existingIds = new Set(parsed.map((l: any) => l.id));
-            const existingUrls = new Set(parsed.map((l: any) => l.url));
-            for (const seed of DEFAULT_SEED_INTERNAL_LINKS) {
-              if (!existingIds.has(seed.id) && !existingUrls.has(seed.url)) {
-                migrated.push(seed);
-                changed = true;
-              }
+          // Merge any seed destinations not yet present
+          for (const seed of DEFAULT_SEED_INTERNAL_LINKS) {
+            if (!existingIds.has(seed.id) && !existingUrls.has(seed.url)) {
+              migrated.push(seed);
+              changed = true;
             }
           }
 
           if (changed) {
-            this.saveRawInternalLinks(migrated, { silent: true });
+            this.saveRawInternalLinks(migrated);
           }
           return migrated;
         }
@@ -1391,14 +1390,9 @@ export const storage = {
     } catch (e) {
       console.warn('Failed to read internal links from localStorage:', e);
     }
-
-    if (!initialized) {
-      markSeedsInitialized();
-      const seed = DEFAULT_SEED_INTERNAL_LINKS;
-      this.saveRawInternalLinks(seed, { silent: true });
-      return seed;
-    }
-    return [];
+    const seed = DEFAULT_SEED_INTERNAL_LINKS;
+    this.saveRawInternalLinks(seed);
+    return seed;
   },
 
   getInternalLinks(): InternalLink[] {
@@ -1410,7 +1404,7 @@ export const storage = {
     return list.find((l) => l.id === id) || null;
   },
 
-  saveRawInternalLinks(links: InternalLink[], options?: { silent?: boolean }): void {
+  saveRawInternalLinks(links: InternalLink[]): void {
     try {
       localStorage.setItem(STORAGE_KEY_INTERNAL_LINKS, JSON.stringify(links));
     } catch (e) {
@@ -1419,9 +1413,7 @@ export const storage = {
     indexedDBService.putMany(STORES.INTERNAL_LINKS, links).catch((err) => {
       console.warn('Async IndexedDB saveRawInternalLinks error:', err);
     });
-    if (!options?.silent) {
-      this.notifyListeners();
-    }
+    this.notifyListeners();
   },
 
   saveInternalLink(link: InternalLink): void {
@@ -1697,26 +1689,22 @@ export const storage = {
   // RESEARCH REPOSITORY (Studies, Claims, Files)
   // ==========================================
   getRawResearchStudiesIncludingDeleted(): ResearchStudy[] {
-    const initialized = areSeedsInitialized();
     let list: ResearchStudy[] = [];
     try {
       const stored = localStorage.getItem(STORAGE_KEY_RESEARCH_STUDIES);
-      if (stored !== null) {
+      if (stored) {
         const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed)) {
+        if (Array.isArray(parsed) && parsed.length > 0) {
           list = parsed;
         }
       }
     } catch (e) {
       console.warn('Failed to read research studies from localStorage:', e);
     }
-
-    if (list.length === 0 && !initialized) {
-      markSeedsInitialized();
+    if (list.length === 0) {
       list = DEFAULT_SEED_RESEARCH_STUDIES;
-      this.saveRawResearchStudies(list, { silent: true });
+      this.saveRawResearchStudies(list);
     }
-
     return list.map((s) => ({
       ...s,
       publication: s.publication || s.sourceOrPublisher || '',
@@ -1740,7 +1728,7 @@ export const storage = {
     return list.find((s) => s.id === id) || null;
   },
 
-  saveRawResearchStudies(studies: ResearchStudy[], options?: { silent?: boolean }): void {
+  saveRawResearchStudies(studies: ResearchStudy[]): void {
     try {
       localStorage.setItem(STORAGE_KEY_RESEARCH_STUDIES, JSON.stringify(studies));
     } catch (e) {
@@ -1749,9 +1737,7 @@ export const storage = {
     indexedDBService.putMany(STORES.RESEARCH_STUDIES, studies).catch((err) => {
       console.warn('Async IndexedDB saveRawResearchStudies error:', err);
     });
-    if (!options?.silent) {
-      this.notifyListeners();
-    }
+    this.notifyListeners();
   },
 
   saveResearchStudies(studies: ResearchStudy[]): void {
@@ -1841,33 +1827,27 @@ export const storage = {
   },
 
   getRawResearchClaimsIncludingDeleted(): ResearchClaim[] {
-    const initialized = areSeedsInitialized();
     try {
       const stored = localStorage.getItem(STORAGE_KEY_RESEARCH_CLAIMS);
-      if (stored !== null) {
+      if (stored) {
         const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed)) {
+        if (Array.isArray(parsed) && parsed.length > 0) {
           return parsed;
         }
       }
     } catch (e) {
       console.warn('Failed to read research claims from localStorage:', e);
     }
-
-    if (!initialized) {
-      markSeedsInitialized();
-      const seed = DEFAULT_SEED_RESEARCH_CLAIMS;
-      this.saveRawResearchClaims(seed, { silent: true });
-      return seed;
-    }
-    return [];
+    const seed = DEFAULT_SEED_RESEARCH_CLAIMS;
+    this.saveRawResearchClaims(seed);
+    return seed;
   },
 
   getResearchClaims(): ResearchClaim[] {
     return this.getRawResearchClaimsIncludingDeleted().filter((c) => !c._isDeleted);
   },
 
-  saveRawResearchClaims(claims: ResearchClaim[], options?: { silent?: boolean }): void {
+  saveRawResearchClaims(claims: ResearchClaim[]): void {
     try {
       localStorage.setItem(STORAGE_KEY_RESEARCH_CLAIMS, JSON.stringify(claims));
     } catch (e) {
@@ -1876,9 +1856,7 @@ export const storage = {
     indexedDBService.putMany(STORES.RESEARCH_CLAIMS, claims).catch((err) => {
       console.warn('Async IndexedDB saveRawResearchClaims error:', err);
     });
-    if (!options?.silent) {
-      this.notifyListeners();
-    }
+    this.notifyListeners();
   },
 
   saveResearchClaims(claims: ResearchClaim[]): void {
@@ -1963,29 +1941,23 @@ export const storage = {
   },
 
   getResearchFiles(): ResearchFile[] {
-    const initialized = areSeedsInitialized();
     try {
       const stored = localStorage.getItem(STORAGE_KEY_RESEARCH_FILES);
-      if (stored !== null) {
+      if (stored) {
         const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed)) {
+        if (Array.isArray(parsed) && parsed.length > 0) {
           return parsed;
         }
       }
     } catch (e) {
       console.warn('Failed to read research files from localStorage:', e);
     }
-
-    if (!initialized) {
-      markSeedsInitialized();
-      const seed = DEFAULT_SEED_RESEARCH_FILES;
-      this.saveResearchFiles(seed, { silent: true });
-      return seed;
-    }
-    return [];
+    const seed = DEFAULT_SEED_RESEARCH_FILES;
+    this.saveResearchFiles(seed);
+    return seed;
   },
 
-  saveResearchFiles(files: ResearchFile[], options?: { silent?: boolean }): void {
+  saveResearchFiles(files: ResearchFile[]): void {
     try {
       localStorage.setItem(STORAGE_KEY_RESEARCH_FILES, JSON.stringify(files));
     } catch (e) {
@@ -1994,9 +1966,7 @@ export const storage = {
     indexedDBService.putMany(STORES.RESEARCH_FILES, files).catch((err) => {
       console.warn('Async IndexedDB saveResearchFiles error:', err);
     });
-    if (!options?.silent) {
-      this.notifyListeners();
-    }
+    this.notifyListeners();
   },
 
   saveResearchFile(file: ResearchFile): void {
@@ -2054,10 +2024,8 @@ export const storage = {
 
     try {
       const projectCount = await indexedDBService.count(STORES.PROJECTS);
-      const initialized = areSeedsInitialized();
-      if (projectCount === 0 && !initialized) {
-        // First run or empty IndexedDB: seed from localStorage/defaults and mark initialized
-        markSeedsInitialized();
+      if (projectCount === 0) {
+        // First run or empty IndexedDB: seed from localStorage/defaults
         const projects = this.getProjects();
         const styleProfiles = this.getStyleProfiles();
         const internalLinks = this.getInternalLinks();
@@ -2081,10 +2049,12 @@ export const storage = {
         ]);
         console.info('IndexedDB initialized & populated with durable studio data.');
       } else {
-        // IndexedDB already contains data: hydrate cache from IndexedDB
+        // IndexedDB already contains data: hydrate cache from IndexedDB while preserving newer local edits
         const idbProjects = await indexedDBService.getAll<WritingProject>(STORES.PROJECTS);
         if (idbProjects.length > 0) {
-          localStorage.setItem(STORAGE_KEY_PROJECTS, JSON.stringify(idbProjects));
+          const currentLocal = this.getRawProjectsIncludingDeleted();
+          const mergedProjects = mergeWithTombstones(currentLocal, idbProjects);
+          localStorage.setItem(STORAGE_KEY_PROJECTS, JSON.stringify(mergedProjects));
         }
         const idbProfiles = await indexedDBService.getAll<StyleProfile>(STORES.STYLE_PROFILES);
         if (idbProfiles.length > 0) {

@@ -887,7 +887,7 @@ export const ContentOutlineDrawer: React.FC<ContentOutlineDrawerProps> = ({
                                         }
                                         className="text-blue-950 hover:text-rose-600"
                                       >
-                                        <X className="w-3 h-3" />
+                                        ×
                                       </button>
                                     </span>
                                   ))}
