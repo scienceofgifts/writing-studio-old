@@ -5,15 +5,19 @@
  */
 
 import React, { useState, useEffect, useRef } from 'react';
-import { syncEngine, SyncStatusInfo } from '../services/syncEngine';
+import { syncEngine, SyncStatusInfo, UnauthorizedDomainInfo } from '../services/syncEngine';
 import { Cloud, CloudOff, RefreshCw, CheckCircle2, LogOut, User, Loader2, AlertTriangle, ShieldCheck } from 'lucide-react';
-
+import { UnauthorizedDomainModal } from './UnauthorizedDomainModal';
 import { toast } from '../services/toastService';
 
 export const CloudSyncBar: React.FC = () => {
   const [syncInfo, setSyncInfo] = useState<SyncStatusInfo>(syncEngine.getStatusInfo());
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [isSigningIn, setIsSigningIn] = useState(false);
+  const [isUnauthorizedModalOpen, setIsUnauthorizedModalOpen] = useState(false);
+  const [unauthorizedInfo, setUnauthorizedInfo] = useState<UnauthorizedDomainInfo | null>(
+    syncEngine.getStatusInfo().unauthorizedDomainInfo || null
+  );
   const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -21,6 +25,10 @@ export const CloudSyncBar: React.FC = () => {
       setSyncInfo(info);
       if (info.user) {
         setIsSigningIn(false);
+        setIsUnauthorizedModalOpen(false);
+      }
+      if (info.unauthorizedDomainInfo) {
+        setUnauthorizedInfo(info.unauthorizedDomainInfo);
       }
     });
     return () => unsub();
@@ -47,6 +55,14 @@ export const CloudSyncBar: React.FC = () => {
         err?.code === 'auth/cancelled-popup-request'
       ) {
         // User closed the popup, silently reset state without error toast
+        return;
+      }
+      if (err?.code === 'auth/unauthorized-domain') {
+        const domain = err.unauthorizedDomain || (typeof window !== 'undefined' ? window.location.hostname : '');
+        const projectId = err.firebaseProjectId || 'eloquent-tracer-2vxch';
+        const consoleUrl = err.consoleUrl || `https://console.firebase.google.com/project/${projectId}/authentication/settings`;
+        setUnauthorizedInfo({ domain, projectId, consoleUrl });
+        setIsUnauthorizedModalOpen(true);
         return;
       }
       if (err?.code === 'auth/popup-blocked') {
@@ -84,8 +100,9 @@ export const CloudSyncBar: React.FC = () => {
 
   // 1. Signed Out
   if (!syncInfo.user) {
+    const activeDomainInfo = unauthorizedInfo || syncInfo.unauthorizedDomainInfo;
     return (
-      <div className="relative">
+      <div className="relative flex items-center gap-1.5">
         <button
           type="button"
           onClick={handleSignIn}
@@ -105,6 +122,36 @@ export const CloudSyncBar: React.FC = () => {
             </>
           )}
         </button>
+
+        {activeDomainInfo && (
+          <button
+            type="button"
+            onClick={() => setIsUnauthorizedModalOpen(true)}
+            className="px-2 py-1 text-[11px] font-semibold text-amber-900 bg-amber-100 hover:bg-amber-200 border border-amber-300 rounded-lg transition-colors inline-flex items-center gap-1 cursor-pointer"
+            title="Preview domain needs authorization in Firebase Console. Click to view instructions."
+          >
+            <AlertTriangle className="w-3 h-3 text-amber-700" />
+            <span className="hidden sm:inline">Authorize Domain</span>
+          </button>
+        )}
+
+        {isUnauthorizedModalOpen && activeDomainInfo && (
+          <UnauthorizedDomainModal
+            isOpen={isUnauthorizedModalOpen}
+            domain={activeDomainInfo.domain}
+            projectId={activeDomainInfo.projectId}
+            consoleUrl={activeDomainInfo.consoleUrl}
+            onClose={() => setIsUnauthorizedModalOpen(false)}
+            onRetry={async () => {
+              try {
+                await handleSignIn();
+              } catch {
+                // Keep modal open or let error toast handle
+              }
+            }}
+            isRetrying={isSigningIn}
+          />
+        )}
       </div>
     );
   }

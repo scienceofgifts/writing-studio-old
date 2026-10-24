@@ -81,12 +81,28 @@ export async function validateFirestoreConnection(): Promise<boolean> {
   }
 }
 
+export function getFirebaseProjectDetails() {
+  return {
+    projectId: firebaseConfig.projectId,
+    firestoreDatabaseId: firebaseConfig.firestoreDatabaseId,
+    consoleAuthSettingsUrl: `https://console.firebase.google.com/project/${firebaseConfig.projectId}/authentication/settings`,
+  };
+}
+
 export async function signInWithGoogle(): Promise<User> {
   try {
     const result = await signInWithPopup(auth, googleProvider);
     return result.user;
   } catch (err: any) {
-    if (err?.code !== 'auth/popup-closed-by-user' && err?.code !== 'auth/cancelled-popup-request') {
+    if (err?.code === 'auth/unauthorized-domain') {
+      const currentHost = typeof window !== 'undefined' ? window.location.hostname : '';
+      err.unauthorizedDomain = currentHost;
+      err.firebaseProjectId = firebaseConfig.projectId;
+      err.consoleUrl = `https://console.firebase.google.com/project/${firebaseConfig.projectId}/authentication/settings`;
+      console.warn(
+        `Firebase Google Sign-In requires "${currentHost}" to be added to Authorized Domains in Firebase Console:\n${err.consoleUrl}`
+      );
+    } else if (err?.code !== 'auth/popup-closed-by-user' && err?.code !== 'auth/cancelled-popup-request') {
       console.error('Google Sign-In failed:', err);
     } else {
       console.info('Google Sign-In popup closed by user.');

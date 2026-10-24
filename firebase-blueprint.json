@@ -12,10 +12,29 @@
         "status": { "type": "string", "enum": ["idea", "in_progress", "review_ready", "completed", "archived"] },
         "createdAt": { "type": "string", "maxLength": 100 },
         "updatedAt": { "type": "string", "maxLength": 100 },
+        "revision": { "type": "number" },
+        "cloudRevision": { "type": "number" },
         "_isDeleted": { "type": "boolean" },
         "deletedAt": { "type": "string", "maxLength": 100 }
       },
       "required": ["id", "type", "title", "updatedAt"]
+    },
+    "ProjectVersionSnapshot": {
+      "title": "Project Version Snapshot",
+      "description": "Historical snapshot of a writing project revision",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "versionNumber": { "type": "number" },
+        "projectId": { "type": "string", "maxLength": 128 },
+        "type": { "type": "string", "maxLength": 100 },
+        "label": { "type": "string", "maxLength": 500 },
+        "timestamp": { "type": "string", "maxLength": 100 },
+        "wordCount": { "type": "number" },
+        "characterCount": { "type": "number" },
+        "content": { "type": "string", "maxLength": 1000000 }
+      },
+      "required": ["id", "versionNumber", "projectId", "timestamp"]
     },
     "StyleProfile": {
       "title": "Style Profile",
@@ -121,6 +140,10 @@
     "/users/{userId}/projects/{projectId}": {
       "schema": "WritingProject",
       "description": "User writing projects"
+    },
+    "/users/{userId}/projects/{projectId}/versions/{versionId}": {
+      "schema": "ProjectVersionSnapshot",
+      "description": "Historical version snapshots for writing projects"
     },
     "/users/{userId}/style_profiles/{profileId}": {
       "schema": "StyleProfile",
