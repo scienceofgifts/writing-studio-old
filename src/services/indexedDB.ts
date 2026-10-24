@@ -5,7 +5,7 @@
  */
 
 const DB_NAME = 'ScienceOfGifts_WritingStudio_DB';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 export const STORES = {
   PROJECTS: 'projects',
@@ -18,6 +18,7 @@ export const STORES = {
   SAVED_IDEAS: 'saved_ideas',
   SETTINGS: 'settings',
   LOCAL_SNAPSHOTS: 'local_snapshots',
+  PROJECT_HISTORY: 'project_history',
 } as const;
 
 export type StoreName = (typeof STORES)[keyof typeof STORES];
@@ -79,6 +80,9 @@ class IndexedDBClient {
         }
         if (!db.objectStoreNames.contains(STORES.LOCAL_SNAPSHOTS)) {
           db.createObjectStore(STORES.LOCAL_SNAPSHOTS, { keyPath: 'id' });
+        }
+        if (!db.objectStoreNames.contains(STORES.PROJECT_HISTORY)) {
+          db.createObjectStore(STORES.PROJECT_HISTORY, { keyPath: 'id' });
         }
       };
 

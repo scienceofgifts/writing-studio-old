@@ -22,7 +22,8 @@ export type VersionType =
   | 'after_ai_edit'
   | 'before_review'
   | 'before_qc'
-  | 'restored_version';
+  | 'restored_version'
+  | 'conflict_backup';
 
 export interface StructuredProjectState {
   title: string;
@@ -49,6 +50,7 @@ export interface ProjectVersionSnapshot {
   content: string; // Preserves complete structured semantic HTML
   structuredState: StructuredProjectState;
   basedOnVersionId?: string;
+  cloudRevision?: number;
   modelUsed?: ModelId;
   actionDescription?: string;
   isFavorite?: boolean;

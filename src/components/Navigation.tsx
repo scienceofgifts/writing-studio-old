@@ -5,7 +5,7 @@
  */
 
 import React, { useState, useRef, useEffect } from 'react';
-import { ProjectType, WritingProject, ActivePanel } from '../types/project';
+import { ProjectType, WritingProject, ActivePanel, SaveStatus } from '../types/project';
 import {
   Compass,
   FileText,
@@ -33,14 +33,21 @@ import {
   History,
   Lightbulb,
   Database,
+  Save,
+  Cloud,
+  CloudOff,
+  AlertTriangle,
 } from 'lucide-react';
 import { CloudSyncBar } from './CloudSyncBar';
 
 interface NavigationProps {
   currentView: 'dashboard' | 'workspace' | 'settings' | 'style_reference' | 'internal_links' | 'idea_generator' | 'backup' | 'research';
   activeProject: WritingProject | null;
-  saveStatus: 'saved' | 'saving' | 'unsaved' | 'error';
+  saveStatus: SaveStatus;
+  hasUnsavedChanges?: boolean;
+  onManualSave?: () => void;
   onRetrySave?: () => void;
+  onOpenConflictModal?: () => void;
   activePanel?: ActivePanel;
   onTogglePanel?: (panel: Exclude<ActivePanel, null>) => void;
   onNavigate: (
@@ -60,7 +67,10 @@ export const Navigation: React.FC<NavigationProps> = ({
   currentView,
   activeProject,
   saveStatus,
+  hasUnsavedChanges = false,
+  onManualSave,
   onRetrySave,
+  onOpenConflictModal,
   activePanel = null,
   onTogglePanel,
   onNavigate,
@@ -111,40 +121,94 @@ export const Navigation: React.FC<NavigationProps> = ({
     }
   };
 
-  const getSaveIndicator = () => {
+  const isSavingInFlight = saveStatus === 'saving_local' || saveStatus === 'saving_cloud';
+
+  const getSaveIndicator = (isMobile = false) => {
+    const testId = isMobile ? 'save-status-indicator-mobile' : 'save-status-indicator';
     switch (saveStatus) {
-      case 'saving':
-        return (
-          <div className="flex items-center gap-1.5 text-xs text-[#736c61] select-none font-medium">
-            <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-700" />
-            <span>Saving...</span>
-          </div>
-        );
       case 'unsaved':
         return (
-          <div className="flex items-center gap-1.5 text-xs text-amber-800 select-none font-medium">
+          <div
+            data-testid={testId}
+            data-status="unsaved"
+            className="flex items-center gap-1.5 text-xs text-amber-800 select-none font-medium"
+          >
             <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse"></span>
             <span>Unsaved changes</span>
           </div>
         );
-      case 'error':
+      case 'saving_local':
+        return (
+          <div
+            data-testid={testId}
+            data-status="saving_local"
+            className="flex items-center gap-1.5 text-xs text-[#736c61] select-none font-medium"
+          >
+            <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-700" />
+            <span>Saving locally</span>
+          </div>
+        );
+      case 'saved_local':
+        return (
+          <div
+            data-testid={testId}
+            data-status="saved_local"
+            className="flex items-center gap-1.5 text-xs text-stone-700 select-none font-medium"
+            title="Saved in this browser's local storage. Sign in and click Save to sync to the cloud."
+          >
+            <CloudOff className="w-3.5 h-3.5 text-stone-500" />
+            <span>Saved locally — not synced</span>
+          </div>
+        );
+      case 'saving_cloud':
+        return (
+          <div
+            data-testid={testId}
+            data-status="saving_cloud"
+            className="flex items-center gap-1.5 text-xs text-blue-800 select-none font-medium"
+          >
+            <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-700" />
+            <span>Saving to cloud</span>
+          </div>
+        );
+      case 'cloud_error':
         return (
           <button
             type="button"
-            onClick={onRetrySave}
+            onClick={onRetrySave || onManualSave}
+            data-testid={testId}
+            data-status="cloud_error"
             className="flex items-center gap-1.5 text-xs text-rose-800 hover:text-rose-950 select-none font-semibold cursor-pointer underline decoration-dotted"
-            title="Saving failed. Click to retry."
+            title="Saved locally, but cloud upload failed. Click to retry."
           >
-            <span className="w-2 h-2 rounded-full bg-rose-600"></span>
-            <span>Save failed (Retry)</span>
+            <AlertCircle className="w-3.5 h-3.5 text-rose-600" />
+            <span>Cloud save failed</span>
           </button>
         );
-      case 'saved':
+      case 'conflict':
+        return (
+          <button
+            type="button"
+            onClick={onOpenConflictModal}
+            data-testid={testId}
+            data-status="conflict"
+            className="flex items-center gap-1.5 text-xs text-red-800 hover:text-red-950 select-none font-semibold cursor-pointer underline decoration-dotted"
+            title="A newer version exists in the cloud. Click to review and resolve."
+          >
+            <AlertTriangle className="w-3.5 h-3.5 text-red-600" />
+            <span>Conflict — changes need review</span>
+          </button>
+        );
+      case 'saved_cloud':
       default:
         return (
-          <div className="flex items-center gap-1.5 text-xs text-emerald-800 select-none font-medium">
-            <span className="w-2 h-2 rounded-full bg-emerald-600"></span>
-            <span>Saved</span>
+          <div
+            data-testid={testId}
+            data-status="saved_cloud"
+            className="flex items-center gap-1.5 text-xs text-emerald-800 select-none font-medium"
+          >
+            <Cloud className="w-3.5 h-3.5 text-emerald-600" />
+            <span>Saved to cloud</span>
           </div>
         );
     }
@@ -466,10 +530,25 @@ export const Navigation: React.FC<NavigationProps> = ({
               {activeProject.title || 'Untitled Draft'}
             </span>
 
-            {/* Autosave Status */}
+            {/* Save Status & Explicit Save Button (Mobile) */}
             <div className="px-2 py-1 bg-white/90 border border-[#dcd6ca] rounded-md shadow-2xs shrink-0 select-none min-h-[32px] flex items-center text-xs">
-              {getSaveIndicator()}
+              {getSaveIndicator(true)}
             </div>
+
+            <button
+              type="button"
+              onClick={onManualSave}
+              disabled={isSavingInFlight}
+              className={`px-2.5 py-1.5 rounded-md text-xs font-semibold inline-flex items-center gap-1 shrink-0 min-h-[32px] transition-colors cursor-pointer disabled:opacity-50 ${
+                hasUnsavedChanges || saveStatus === 'cloud_error'
+                  ? 'bg-[#1e232a] text-white hover:bg-[#2d343e] shadow-2xs'
+                  : 'bg-white/90 border border-[#dcd6ca] text-[#2b251d] hover:bg-white'
+              }`}
+              title="Save project and create version snapshot (Ctrl+S / Cmd+S)"
+            >
+              <Save className="w-3.5 h-3.5" />
+              <span>Save</span>
+            </button>
 
             {/* Tools Bottom Sheet Trigger */}
             <div className="relative shrink-0" ref={panelsMenuRef}>
@@ -793,8 +872,8 @@ export const Navigation: React.FC<NavigationProps> = ({
 
           {/* Desktop Tier 2 Layout (>= 768px, fully preserved) */}
           <div className="hidden md:flex items-center justify-between gap-3">
-            {/* Left: Back Link, Save Status, Model Selector, Project Title */}
-            <div className="flex items-center gap-2.5 min-w-0 flex-1">
+            {/* Left: Back Link, Save Status, Save Action, Project Title */}
+            <div className="flex items-center gap-2 shrink-0">
               {/* Back to Project Category in Dashboard */}
               <button
                 type="button"
@@ -808,16 +887,33 @@ export const Navigation: React.FC<NavigationProps> = ({
 
               <span className="text-[#c7bfaf] select-none shrink-0">•</span>
 
-              {/* Autosave Status Indicator - Own independent flex item */}
-              <div className="px-2.5 py-0.5 bg-white/80 border border-[#dcd6ca] rounded-md shadow-2xs shrink-0 select-none">
+              {/* Save Status Indicator */}
+              <div className="px-2.5 py-1 bg-white/80 border border-[#dcd6ca] rounded-md shadow-2xs shrink-0 select-none">
                 {getSaveIndicator()}
               </div>
 
-              <span className="text-[#c7bfaf] select-none shrink-0 hidden lg:inline">•</span>
+              {/* Explicit Manual Save Action */}
+              <button
+                type="button"
+                onClick={onManualSave}
+                disabled={isSavingInFlight}
+                data-testid="manual-save-button"
+                className={`px-3 py-1 rounded-md text-xs font-semibold inline-flex items-center gap-1.5 shrink-0 transition-all cursor-pointer disabled:opacity-50 ${
+                  hasUnsavedChanges || saveStatus === 'cloud_error'
+                    ? 'bg-[#1e232a] text-white hover:bg-[#2d343e] shadow-2xs'
+                    : 'bg-white/90 border border-[#dcd6ca] text-[#2b251d] hover:bg-white'
+                }`}
+                title="Save project and create version snapshot (Ctrl+S / Cmd+S)"
+              >
+                <Save className={`w-3.5 h-3.5 ${hasUnsavedChanges ? 'text-amber-300' : 'text-[#5c5447]'}`} />
+                <span>Save</span>
+              </button>
+
+              <span className="text-[#c7bfaf] select-none shrink-0 hidden 2xl:inline">•</span>
 
               {/* Current Project Title */}
               <span
-                className="font-editorial text-sm font-bold text-[#1e232a] truncate min-w-0 flex-1 hidden md:inline"
+                className="font-editorial text-sm font-bold text-[#1e232a] truncate max-w-[200px] hidden 2xl:inline-block"
                 title={activeProject.title || 'Untitled Draft'}
               >
                 {activeProject.title || 'Untitled Draft'}
@@ -825,7 +921,7 @@ export const Navigation: React.FC<NavigationProps> = ({
             </div>
 
             {/* Right: Mutually Exclusive Project Drawer Controls */}
-            <div className="flex items-center gap-2 shrink-0">
+            <div className="flex items-center gap-2 min-w-0 overflow-x-auto">
               <div className="flex items-center gap-1 bg-white/60 p-0.5 rounded-lg border border-[#dcd6ca] text-xs font-medium text-[#4a443b]">
                 {/* Develop (Articles only) */}
                 {activeProject.type === 'article' && (

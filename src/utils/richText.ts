@@ -137,6 +137,12 @@ export function normalizeEditorHtml(html: string | undefined | null): string {
   return semantic
     .replace(/\u00a0/g, ' ')
     .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/<li>\s*<p>([\s\S]*?)<\/p>\s*<\/li>/gi, '<li>$1</li>')
+    .replace(/\s+class="rounded-xl max-w-full my-4 border border-\[#e5dfd3\]"/gi, '')
+    .replace(/\s+target="_self"/gi, '')
+    .replace(/\s+rel="noopener noreferrer(?:\s+nofollow)?"/gi, '')
+    .replace(/<img\b([^>]*?)\s*\/>/gi, '<img$1>')
     .replace(
       /<\/(p|h[1-6]|ul|ol|li|blockquote|div|pre)>\s+<((?:p|h[1-6]|ul|ol|li|blockquote|div|pre|hr|img)\b)/gi,
       '</$1><$2'

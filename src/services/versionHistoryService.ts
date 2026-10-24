@@ -13,7 +13,7 @@ import {
 import { countWords, extractPlainTextFromHtml } from '../utils/richText';
 import { ModelId } from '../types/models';
 
-const MAX_VERSION_COUNT = 50;
+const MAX_INLINE_VERSION_COUNT = 25;
 
 /**
  * Extracts structured project state for snapshotting
@@ -34,6 +34,70 @@ export function extractStructuredState(project: WritingProject): StructuredProje
 }
 
 /**
+ * Merges two or more arrays of version snapshots without losing entries.
+ * Deduplicates by id (or identical timestamp+content+type) and assigns consistent sequential versionNumbers if needed.
+ */
+export function mergeVersionHistories(
+  ...histories: (ProjectVersionSnapshot[] | undefined)[]
+): ProjectVersionSnapshot[] {
+  const byId = new Map<string, ProjectVersionSnapshot>();
+  for (const list of histories) {
+    if (!Array.isArray(list)) continue;
+    for (const snap of list) {
+      if (!snap || !snap.id) continue;
+      const existing = byId.get(snap.id);
+      if (!existing) {
+        byId.set(snap.id, snap);
+      } else {
+        // Keep favorite flag or fuller fields if one was updated
+        byId.set(snap.id, {
+          ...existing,
+          ...snap,
+          isFavorite: existing.isFavorite || snap.isFavorite,
+        });
+      }
+    }
+  }
+
+  const all = Array.from(byId.values());
+  // Sort oldest to newest first so we can ensure strictly monotonic versionNumbers if any collided across devices
+  all.sort((a, b) => {
+    const tA = new Date(a.timestamp || 0).getTime();
+    const tB = new Date(b.timestamp || 0).getTime();
+    if (tA !== tB) return tA - tB;
+    return (a.versionNumber || 0) - (b.versionNumber || 0);
+  });
+
+  let highestVer = 0;
+  const normalized = all.map((snap) => {
+    const vNum = Math.max(highestVer + 1, snap.versionNumber || 1);
+    highestVer = vNum;
+    return {
+      ...snap,
+      versionNumber: vNum,
+    };
+  });
+
+  // Return newest first
+  return normalized.sort((a, b) => b.versionNumber - a.versionNumber);
+}
+
+/**
+ * Trims inline project history to keep main Firestore project document well under the 1 MiB limit,
+ * while all snapshots remain in the dedicated project_history IndexedDB store and Firestore history subcollection.
+ */
+export function trimInlineVersionHistory(history: ProjectVersionSnapshot[]): ProjectVersionSnapshot[] {
+  if (history.length <= MAX_INLINE_VERSION_COUNT) {
+    return history;
+  }
+  const favorites = history.filter((v) => v.isFavorite);
+  const others = history.filter((v) => !v.isFavorite);
+  const keepCount = Math.max(5, MAX_INLINE_VERSION_COUNT - favorites.length);
+  const kept = [...favorites, ...others.slice(0, keepCount)];
+  return kept.sort((a, b) => b.versionNumber - a.versionNumber);
+}
+
+/**
  * Creates a new version snapshot and returns the updated version history array
  */
 export function createVersionSnapshot(
@@ -44,6 +108,8 @@ export function createVersionSnapshot(
     modelUsed?: ModelId;
     actionDescription?: string;
     force?: boolean;
+    cloudRevision?: number;
+    snapshotId?: string;
   }
 ): ProjectVersionSnapshot[] {
   const existingHistory = project.versionHistory || [];
@@ -51,23 +117,28 @@ export function createVersionSnapshot(
   const plainText = extractPlainTextFromHtml(content);
   const words = countWords(content);
   const chars = plainText.length;
+  const structuredState = extractStructuredState(project);
 
-  // Deduplication check: if latest version has identical content and identical title, skip unless forced or manual with custom label
-  if (existingHistory.length > 0 && !options?.force && type !== 'manual_save') {
+  // Deduplication check: if latest version has identical content and structured state, skip unless forced
+  if (existingHistory.length > 0 && !options?.force) {
     const latest = existingHistory[0];
     if (
       latest.content.trim() === content.trim() &&
-      latest.structuredState.title === project.title &&
-      latest.type === type
+      JSON.stringify(latest.structuredState) === JSON.stringify(structuredState) &&
+      (latest.type === type || type === 'manual_save')
     ) {
       return existingHistory;
     }
   }
 
-  const nextVersionNumber = existingHistory.length > 0 ? existingHistory[0].versionNumber + 1 : 1;
+  const maxExistingNumber = existingHistory.reduce(
+    (max, v) => Math.max(max, v.versionNumber || 0),
+    0
+  );
+  const nextVersionNumber = maxExistingNumber + 1;
 
   const newSnapshot: ProjectVersionSnapshot = {
-    id: `ver-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    id: options?.snapshotId || `ver-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     versionNumber: nextVersionNumber,
     projectId: project.id,
     type,
@@ -76,26 +147,14 @@ export function createVersionSnapshot(
     wordCount: words,
     characterCount: chars,
     content,
-    structuredState: extractStructuredState(project),
+    structuredState,
+    cloudRevision: options?.cloudRevision,
     modelUsed: options?.modelUsed,
     actionDescription: options?.actionDescription,
   };
 
   const updatedHistory = [newSnapshot, ...existingHistory];
-
-  // Retention cleanup: keep all manual_save, restored_version, and recent snapshots
-  if (updatedHistory.length > MAX_VERSION_COUNT) {
-    const essential = updatedHistory.filter(
-      (v) => v.type === 'manual_save' || v.type === 'restored_version' || v.isFavorite
-    );
-    const nonEssential = updatedHistory.filter(
-      (v) => v.type !== 'manual_save' && v.type !== 'restored_version' && !v.isFavorite
-    );
-    const trimmedNonEssential = nonEssential.slice(0, MAX_VERSION_COUNT - essential.length);
-    return [...essential, ...trimmedNonEssential].sort((a, b) => b.versionNumber - a.versionNumber);
-  }
-
-  return updatedHistory;
+  return trimInlineVersionHistory(updatedHistory);
 }
 
 /**
@@ -105,24 +164,37 @@ export function createVersionSnapshot(
  */
 export function restoreVersionSnapshot(
   project: WritingProject,
-  targetVersionId: string
-): { updatedProject: WritingProject; restoredVersion: ProjectVersionSnapshot } | null {
-  const history = project.versionHistory || [];
+  targetVersionId: string,
+  externalHistory?: ProjectVersionSnapshot[]
+): { updatedProject: WritingProject; restoredVersion: ProjectVersionSnapshot; newSnapshots: ProjectVersionSnapshot[] } | null {
+  const history = mergeVersionHistories(project.versionHistory, externalHistory);
   const targetVersion = history.find((v) => v.id === targetVersionId);
   if (!targetVersion) return null;
 
-  // 1. Create a checkpoint of the current document before restoring
-  const historyWithCurrentCheckpoint = createVersionSnapshot(project, 'manual_save', {
+  const projectWithMergedHistory: WritingProject = {
+    ...project,
+    versionHistory: history,
+  };
+
+  // 1. Create a checkpoint of the current document before restoring (if it differs from latest snapshot)
+  const historyWithCurrentCheckpoint = createVersionSnapshot(projectWithMergedHistory, 'manual_save', {
     label: `Before restoring Version ${targetVersion.versionNumber}`,
     actionDescription: `Auto-checkpoint prior to Version ${targetVersion.versionNumber} restore`,
-    force: true,
+    force: false,
   });
+
+  const newSnapshots: ProjectVersionSnapshot[] = [];
+  if (
+    historyWithCurrentCheckpoint.length > 0 &&
+    (!history[0] || historyWithCurrentCheckpoint[0].id !== history[0].id)
+  ) {
+    newSnapshots.push(historyWithCurrentCheckpoint[0]);
+  }
 
   // 2. Prepare restored project state
   const restoredState = targetVersion.structuredState;
-  const nextVersionNumber = historyWithCurrentCheckpoint.length > 0
-    ? historyWithCurrentCheckpoint[0].versionNumber + 1
-    : targetVersion.versionNumber + 1;
+  const maxVer = historyWithCurrentCheckpoint.reduce((m, v) => Math.max(m, v.versionNumber || 0), 0);
+  const nextVersionNumber = maxVer + 1;
 
   const restoredCheckpoint: ProjectVersionSnapshot = {
     id: `ver-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -139,6 +211,10 @@ export function restoreVersionSnapshot(
     actionDescription: `Restored from Version ${targetVersion.versionNumber}`,
   };
 
+  newSnapshots.unshift(restoredCheckpoint);
+
+  const combinedHistory = [restoredCheckpoint, ...historyWithCurrentCheckpoint];
+
   const updatedProject: WritingProject = {
     ...project,
     title: restoredState.title || project.title,
@@ -151,12 +227,11 @@ export function restoreVersionSnapshot(
     articleMeta: restoredState.articleMeta || project.articleMeta,
     giftGuideMeta: restoredState.giftGuideMeta || project.giftGuideMeta,
     productCopyMeta: restoredState.productCopyMeta || project.productCopyMeta,
-    // Stale preservation: clear any pending ephemeral diff proposals
-    versionHistory: [restoredCheckpoint, ...historyWithCurrentCheckpoint],
+    versionHistory: trimInlineVersionHistory(combinedHistory),
     updatedAt: new Date().toISOString(),
   };
 
-  return { updatedProject, restoredVersion: targetVersion };
+  return { updatedProject, restoredVersion: targetVersion, newSnapshots };
 }
 
 /**
@@ -166,7 +241,7 @@ function getDefaultVersionLabel(type: VersionType, actionDescription?: string): 
   if (actionDescription) return actionDescription;
   switch (type) {
     case 'manual_save':
-      return 'Manual Save';
+      return 'Saved Version';
     case 'autosave_snapshot':
       return 'Autosave Snapshot';
     case 'before_ai_edit':
@@ -179,6 +254,8 @@ function getDefaultVersionLabel(type: VersionType, actionDescription?: string): 
       return 'Before Quality Control';
     case 'restored_version':
       return 'Restored Version';
+    case 'conflict_backup':
+      return 'Conflict Backup';
     default:
       return 'Snapshot';
   }

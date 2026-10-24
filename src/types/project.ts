@@ -480,8 +480,32 @@ export interface WritingProject {
   outlineStructure?: OutlineStructureType; // Applied structure type (essay, standard_article, guide, custom)
   outlineRationale?: string; // Editorial rationale for this outline progression
   outlineMetadata?: OutlineStudioMetadata; // Additional Outline Studio metadata
+  cloudRevision?: number; // Monotonically increasing server revision number
+  baseCloudRevision?: number; // Last cloud revision this local copy was based on
+  lastSyncedAt?: string; // Timestamp of last confirmed cloud sync
+  lastSyncedUserId?: string; // UID of the account that last synced this record
+  _hasLocalUnsyncedSave?: boolean; // True when a local save occurred since last cloud sync
+  _isSeedProject?: boolean; // True for unmodified default seed projects
   _isDeleted?: boolean;
   deletedAt?: string;
+}
+
+export type SaveStatus =
+  | 'unsaved'
+  | 'saving_local'
+  | 'saved_local'
+  | 'saving_cloud'
+  | 'saved_cloud'
+  | 'cloud_error'
+  | 'conflict';
+
+export interface ProjectConflictInfo {
+  projectId: string;
+  localWorkingProject: WritingProject;
+  remoteProject: WritingProject;
+  baseRevision: number;
+  remoteRevision: number;
+  detectedAt: string;
 }
 
 export interface DiffProposal {

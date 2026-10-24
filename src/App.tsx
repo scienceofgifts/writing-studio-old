@@ -11,8 +11,12 @@ import {
   DiffProposal,
   OutlineItem,
   ActivePanel,
+  SaveStatus,
+  ProjectConflictInfo,
 } from './types/project';
+import { ProjectVersionSnapshot } from './types/versionHistory';
 import { storage } from './services/storage';
+import { syncEngine } from './services/syncEngine';
 import { geminiService } from './services/geminiClient';
 import { toast } from './services/toastService';
 import { ToastContainer } from './components/Toast';
@@ -25,6 +29,8 @@ import { GiftGuideWorkspace } from './components/workspaces/GiftGuideWorkspace';
 import { ProductCopyWorkspace } from './components/workspaces/ProductCopyWorkspace';
 import { SettingsView } from './components/SettingsView';
 import { DiffReviewModal } from './components/DiffReviewModal';
+import { UnsavedChangesModal } from './components/UnsavedChangesModal';
+import { ConflictResolutionModal } from './components/ConflictResolutionModal';
 import { ProjectBriefDrawer } from './components/drawers/ProjectBriefDrawer';
 import { EditorialDevelopmentDrawer } from './components/drawers/EditorialDevelopmentDrawer';
 import { ContentOutlineDrawer } from './components/drawers/ContentOutlineDrawer';
@@ -39,7 +45,11 @@ import { EditorialIntelligenceDrawer } from './components/drawers/EditorialIntel
 import { VersionHistoryDrawer } from './components/drawers/VersionHistoryDrawer';
 import { LinkOpportunity } from './types/internalLink';
 import { ReviewFinding, EditorialReviewResult, QCResult, QCFinding } from './types/project';
-import { createVersionSnapshot } from './services/versionHistoryService';
+import {
+  createVersionSnapshot,
+  mergeVersionHistories,
+  trimInlineVersionHistory,
+} from './services/versionHistoryService';
 import { ensureSemanticHtml, isEquivalentEditorHtml } from './utils/richText';
 import { applyHyperlinkToHtml, isValidUrl, isUrlAlreadyInDocument } from './utils/urlUtils';
 import { applyTheme } from './theme/tokens';
@@ -52,44 +62,158 @@ import { ResearchStudyWorkspace } from './components/research/ResearchStudyWorks
 import { ResearchDrawer } from './components/drawers/ResearchDrawer';
 import { CitationStudioDrawer } from './components/drawers/CitationStudioDrawer';
 
+function stableStringify(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item)).join(',')}]`;
+  }
+  if (typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    const keys = Object.keys(record)
+      .filter((k) => record[k] !== undefined)
+      .sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(record[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function isProjectDirtyAgainstBaseline(
+  current: WritingProject,
+  baseline: WritingProject | undefined
+): boolean {
+  if (!baseline) return true;
+  if (current === baseline) return false;
+  if (!isEquivalentEditorHtml(current.content || '', baseline.content || '')) return true;
+  if ((current.title || '') !== (baseline.title || '')) return true;
+  if (current.status !== baseline.status) return true;
+  if ((current.projectInstructions || '') !== (baseline.projectInstructions || '')) return true;
+  if ((current.styleProfileId || '') !== (baseline.styleProfileId || '')) return true;
+  if ((current.modelOverride || '') !== (baseline.modelOverride || '')) return true;
+  if (stableStringify(current.brief || {}) !== stableStringify(baseline.brief || {})) return true;
+  if (stableStringify(current.outline || []) !== stableStringify(baseline.outline || [])) {
+    return true;
+  }
+  if (
+    stableStringify(current.contentRules || []) !== stableStringify(baseline.contentRules || [])
+  ) {
+    return true;
+  }
+  if (
+    stableStringify(current.writingControls || {}) !==
+    stableStringify(baseline.writingControls || {})
+  ) {
+    return true;
+  }
+  if (stableStringify(current.articleMeta || {}) !== stableStringify(baseline.articleMeta || {})) {
+    return true;
+  }
+  if (
+    stableStringify(current.giftGuideMeta || {}) !==
+    stableStringify(baseline.giftGuideMeta || {})
+  ) {
+    return true;
+  }
+  if (
+    stableStringify(current.productCopyMeta || {}) !==
+    stableStringify(baseline.productCopyMeta || {})
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function getCleanBaselineSaveStatus(project: WritingProject | null | undefined): SaveStatus {
+  if (!project) return 'saved_local';
+  if (
+    syncEngine.isSignedIn() &&
+    !project._hasLocalUnsyncedSave &&
+    (project.cloudRevision ?? 0) > 0
+  ) {
+    return 'saved_cloud';
+  }
+  return 'saved_local';
+}
+
 export default function App() {
   const [projects, setProjects] = useState<WritingProject[]>(() => storage.getProjects());
   const [activeProjectId, setActiveProjectId] = useState<string | null>(() => storage.getActiveProjectId());
   const [currentView, setCurrentView] = useState<'dashboard' | 'workspace' | 'settings' | 'style_reference' | 'internal_links' | 'idea_generator' | 'backup' | 'research'>('dashboard');
   const [activeResearchStudyId, setActiveResearchStudyId] = useState<string | null>(null);
-  const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'unsaved' | 'error'>('saved');
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>('saved_local');
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState<boolean>(false);
   const [isFindOpen, setIsFindOpen] = useState(false);
 
-  // Initialize theme tokens and IndexedDB persistence engine on mount
+  // Unsaved Navigation Guard & Conflict Resolution Modal states
+  const [isUnsavedModalOpen, setIsUnsavedModalOpen] = useState(false);
+  const [isSavingForNavigation, setIsSavingForNavigation] = useState(false);
+  const pendingNavigationActionRef = useRef<(() => void) | null>(null);
+
+  const [activeConflict, setActiveConflict] = useState<ProjectConflictInfo | null>(null);
+  const [isConflictModalOpen, setIsConflictModalOpen] = useState(false);
+  const [isResolvingConflict, setIsResolvingConflict] = useState(false);
+
+  // Authoritative saved baselines per project ID
+  const savedBaselinesRef = useRef<Map<string, WritingProject>>(new Map());
+  const hasUnsavedChangesRef = useRef<boolean>(false);
+  const activeProjectIdRef = useRef<string | null>(activeProjectId);
+  const projectsRef = useRef<WritingProject[]>(projects);
+  const isSavingInFlightRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    hasUnsavedChangesRef.current = hasUnsavedChanges;
+  }, [hasUnsavedChanges]);
+
+  useEffect(() => {
+    activeProjectIdRef.current = activeProjectId;
+  }, [activeProjectId]);
+
+  useEffect(() => {
+    projectsRef.current = projects;
+  }, [projects]);
+
+  // Populate initial saved baselines, initialize IndexedDB, and subscribe to storage/remote updates
   useEffect(() => {
     applyTheme(storage.getTheme());
 
+    projectsRef.current.forEach((p) => {
+      if (!savedBaselinesRef.current.has(p.id)) {
+        savedBaselinesRef.current.set(p.id, p);
+      }
+    });
+
     const syncProjectsFromStorage = () => {
+      const nextFromStorage = storage.getProjects();
       setProjects((prev) => {
-        const nextFromStorage = storage.getProjects();
         let changed = prev.length !== nextFromStorage.length;
         const merged = nextFromStorage.map((np, idx) => {
           const existing = prev.find((ep) => ep.id === np.id);
+          // If this is the currently active project and the user has unsaved in-memory edits,
+          // preserve the active in-memory working state!
+          if (
+            existing &&
+            np.id === activeProjectIdRef.current &&
+            hasUnsavedChangesRef.current
+          ) {
+            return existing;
+          }
           if (!existing) {
+            savedBaselinesRef.current.set(np.id, np);
             changed = true;
             return np;
           }
-          const existingTime = new Date(existing.updatedAt || 0).getTime();
-          const nextTime = new Date(np.updatedAt || 0).getTime();
-          // Never allow storage or remote sync to overwrite a newer in-memory local edit
-          if (existingTime > nextTime) {
-            return existing;
-          }
-          // When autosave finishes persisting the current in-memory state, preserve object reference
           if (
-            existingTime === nextTime &&
+            existing.updatedAt === np.updatedAt &&
             existing.title === np.title &&
             existing.status === np.status &&
+            existing.cloudRevision === np.cloudRevision &&
+            existing._hasLocalUnsyncedSave === np._hasLocalUnsyncedSave &&
             isEquivalentEditorHtml(existing.content, np.content)
           ) {
+            savedBaselinesRef.current.set(existing.id, existing);
             if (prev[idx]?.id !== np.id) changed = true;
             return existing;
           }
+          savedBaselinesRef.current.set(np.id, np);
           changed = true;
           return np;
         });
@@ -103,8 +227,72 @@ export default function App() {
       if (activeId) setActiveProjectId(activeId);
     });
 
-    const unsubscribe = storage.subscribe(syncProjectsFromStorage);
-    return unsubscribe;
+    const unsubscribeStorage = storage.subscribe(syncProjectsFromStorage);
+
+    // Subscribe to remote project updates (sign-in reconciliation and real-time snapshot updates)
+    const unsubscribeRemote = syncEngine.subscribeRemoteProjects((remoteProjects) => {
+      const currentActiveId = activeProjectIdRef.current;
+      const isDirtyInMemory = hasUnsavedChangesRef.current;
+
+      if (currentActiveId && isDirtyInMemory) {
+        const remoteActive = remoteProjects.find((p) => p.id === currentActiveId);
+        const localWorking = projectsRef.current.find((p) => p.id === currentActiveId);
+        const baseline = savedBaselinesRef.current.get(currentActiveId);
+
+        if (remoteActive && localWorking) {
+          const remoteChangedFromBaseline =
+            !baseline ||
+            !isEquivalentEditorHtml(remoteActive.content, baseline.content) ||
+            (remoteActive.cloudRevision ?? 0) > (localWorking.baseCloudRevision ?? 0);
+          const remoteDiffersFromWorking = !isEquivalentEditorHtml(
+            remoteActive.content,
+            localWorking.content
+          );
+
+          if (remoteChangedFromBaseline && remoteDiffersFromWorking) {
+            const conflict: ProjectConflictInfo = {
+              projectId: currentActiveId,
+              localWorkingProject: localWorking,
+              remoteProject: remoteActive,
+              baseRevision: localWorking.baseCloudRevision ?? localWorking.cloudRevision ?? 0,
+              remoteRevision: remoteActive.cloudRevision ?? 1,
+              detectedAt: new Date().toISOString(),
+            };
+            syncEngine.registerConflict(conflict);
+            setActiveConflict(conflict);
+            setIsConflictModalOpen(true);
+            setSaveStatus('conflict');
+          }
+        }
+      } else if (currentActiveId && !isDirtyInMemory) {
+        const updatedProj = storage.getProjectById(currentActiveId);
+        if (updatedProj) {
+          savedBaselinesRef.current.set(currentActiveId, updatedProj);
+          setSaveStatus(getCleanBaselineSaveStatus(updatedProj));
+        }
+      }
+    });
+
+    const unsubscribeSyncStatus = syncEngine.subscribe(() => {
+      const currentActiveId = activeProjectIdRef.current;
+      if (!currentActiveId || hasUnsavedChangesRef.current) return;
+      const existingConflict = syncEngine.getConflictForProject(currentActiveId);
+      if (existingConflict) {
+        setActiveConflict(existingConflict);
+        setSaveStatus('conflict');
+        return;
+      }
+      const proj = storage.getProjectById(currentActiveId);
+      if (proj) {
+        setSaveStatus(getCleanBaselineSaveStatus(proj));
+      }
+    });
+
+    return () => {
+      unsubscribeStorage();
+      unsubscribeRemote();
+      unsubscribeSyncStatus();
+    };
   }, []);
 
   // Single source of truth for mutually exclusive writing panels
@@ -149,14 +337,36 @@ export default function App() {
 
   const activeProject = projects.find((p) => p.id === activeProjectId) || null;
 
-  // Persist active project ID
+  // Persist active project ID and sync saveStatus when switching projects
   useEffect(() => {
     storage.setActiveProjectId(activeProjectId);
+    if (!activeProjectId) return;
+    const storedProj = storage.getProjectById(activeProjectId);
+    if (storedProj && !savedBaselinesRef.current.has(activeProjectId)) {
+      savedBaselinesRef.current.set(activeProjectId, storedProj);
+    }
+    const currentInMem = projectsRef.current.find((p) => p.id === activeProjectId);
+    const baseline = savedBaselinesRef.current.get(activeProjectId) || storedProj;
+    const existingConflict = syncEngine.getConflictForProject(activeProjectId);
+
+    if (existingConflict) {
+      setActiveConflict(existingConflict);
+      setHasUnsavedChanges(true);
+      setSaveStatus('conflict');
+    } else if (currentInMem && baseline && isProjectDirtyAgainstBaseline(currentInMem, baseline)) {
+      setHasUnsavedChanges(true);
+      setSaveStatus('unsaved');
+    } else {
+      setActiveConflict(null);
+      setHasUnsavedChanges(false);
+      setSaveStatus(getCleanBaselineSaveStatus(baseline || currentInMem));
+    }
   }, [activeProjectId]);
 
-  // Debounced Autosave
-  const autosaveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-
+  /**
+   * Requirement 1: In-memory editing without timer-driven autosave.
+   * Updates active project in React memory and tracks dirty state against the last saved baseline.
+   */
   const handleUpdateActiveProject = useCallback((updatedProject: WritingProject) => {
     const prevTime = new Date(updatedProject.updatedAt || 0).getTime();
     const nowTime = Math.max(Date.now(), prevTime + 1);
@@ -165,84 +375,231 @@ export default function App() {
       updatedAt: new Date(nowTime).toISOString(),
     };
 
-    storage.stagePendingProject(stampedProject);
-    setSaveStatus('unsaved');
     setProjects((prev) => prev.map((p) => (p.id === stampedProject.id ? stampedProject : p)));
 
-    if (autosaveTimeoutRef.current) {
-      clearTimeout(autosaveTimeoutRef.current);
-    }
+    const baseline =
+      savedBaselinesRef.current.get(stampedProject.id) ||
+      storage.getProjectById(stampedProject.id);
+    const isDirty = isProjectDirtyAgainstBaseline(stampedProject, baseline);
+    const existingConflict = syncEngine.getConflictForProject(stampedProject.id);
 
-    autosaveTimeoutRef.current = setTimeout(() => {
-      setSaveStatus('saving');
-      try {
-        storage.saveProject(stampedProject);
-        setTimeout(() => {
-          setSaveStatus('saved');
-        }, 250);
-      } catch (err) {
-        console.error('Failed to autosave project:', err);
-        setSaveStatus('error');
-        toast.error('Autosave failed', 'Could not persist to storage. Local edits are preserved.');
-      }
-    }, 600);
+    setHasUnsavedChanges(isDirty);
+    hasUnsavedChangesRef.current = isDirty;
+
+    if (existingConflict) {
+      setSaveStatus('conflict');
+    } else if (isDirty) {
+      setSaveStatus('unsaved');
+    } else {
+      setSaveStatus(getCleanBaselineSaveStatus(baseline));
+    }
   }, []);
 
-  // Immediate manual save
+  /**
+   * Requirement 2, 5, 6, 7: Explicit Manual Save with automatic version history and atomic cloud transaction.
+   * Returns true if save succeeded (local when signed out, or local + cloud when signed in).
+   */
+  const performProjectSave = useCallback(
+    async (options?: {
+      projectOverride?: WritingProject;
+      newSnapshotsOverride?: ProjectVersionSnapshot[];
+      forceOverwrite?: boolean;
+      label?: string;
+      silentToast?: boolean;
+    }): Promise<boolean> => {
+      const targetBase =
+        options?.projectOverride ||
+        projectsRef.current.find((p) => p.id === activeProjectIdRef.current) ||
+        activeProject;
+      if (!targetBase) return false;
+      if (isSavingInFlightRef.current) return false;
+
+      isSavingInFlightRef.current = true;
+
+      try {
+        // Capture current live HTML from editor if saving the active workspace project
+        let liveContent = targetBase.content;
+        if (
+          !options?.projectOverride &&
+          editorRef.current &&
+          typeof editorRef.current.getHTML === 'function'
+        ) {
+          try {
+            liveContent = editorRef.current.getHTML();
+          } catch (e) {
+            console.warn('Could not read live HTML from editorRef:', e);
+          }
+        }
+
+        const nowIso = new Date().toISOString();
+        const candidateProject: WritingProject = {
+          ...targetBase,
+          content: ensureSemanticHtml(liveContent),
+          updatedAt: nowIso,
+        };
+
+        // Create version-history snapshot (deduplicated automatically if identical to latest snapshot)
+        const prevTopSnapshotId = candidateProject.versionHistory?.[0]?.id;
+        const updatedHistory = options?.newSnapshotsOverride
+          ? candidateProject.versionHistory || []
+          : createVersionSnapshot(candidateProject, 'manual_save', {
+              label: options?.label,
+              force: false,
+            });
+
+        const newSnapshots: ProjectVersionSnapshot[] = options?.newSnapshotsOverride
+          ? options.newSnapshotsOverride
+          : updatedHistory.length > 0 && updatedHistory[0].id !== prevTopSnapshotId
+            ? [updatedHistory[0]]
+            : [];
+
+        const projectWithHistory: WritingProject = {
+          ...candidateProject,
+          versionHistory: updatedHistory,
+        };
+
+        // Step 1: Local persistence
+        setSaveStatus('saving_local');
+        const savedLocal = storage.saveProject(projectWithHistory, {
+          markUnsynced: true,
+          newSnapshots,
+        });
+
+        // If signed out, local save is the final step
+        if (!syncEngine.isSignedIn()) {
+          savedBaselinesRef.current.set(savedLocal.id, savedLocal);
+          setProjects((prev) =>
+            prev.map((p) => {
+              if (p.id !== savedLocal.id) return p;
+              // If user continued typing during save, keep their newer live content
+              if (!isProjectDirtyAgainstBaseline(p, candidateProject)) {
+                return savedLocal;
+              }
+              return {
+                ...p,
+                versionHistory: savedLocal.versionHistory,
+              };
+            })
+          );
+
+          const latestInMem =
+            projectsRef.current.find((p) => p.id === savedLocal.id) || savedLocal;
+          const stillDirty = isProjectDirtyAgainstBaseline(latestInMem, savedLocal);
+          setHasUnsavedChanges(stillDirty);
+          hasUnsavedChangesRef.current = stillDirty;
+          setSaveStatus(stillDirty ? 'unsaved' : 'saved_local');
+
+          if (!options?.silentToast) {
+            toast.success(
+              'Saved locally',
+              `"${savedLocal.title || 'Untitled'}" saved locally (not synced to cloud).`
+            );
+          }
+          return true;
+        }
+
+        // Step 2: Signed-in Concurrency-Safe Cloud Save
+        setSaveStatus('saving_cloud');
+        const cloudResult = await syncEngine.saveProjectToCloud(savedLocal, newSnapshots, {
+          forceOverwrite: options?.forceOverwrite,
+        });
+
+        if (cloudResult.status === 'saved_cloud') {
+          const syncedProject = cloudResult.savedProject;
+          savedBaselinesRef.current.set(syncedProject.id, syncedProject);
+
+          setProjects((prev) =>
+            prev.map((p) => {
+              if (p.id !== syncedProject.id) return p;
+              if (!isProjectDirtyAgainstBaseline(p, candidateProject)) {
+                return syncedProject;
+              }
+              return {
+                ...p,
+                cloudRevision: syncedProject.cloudRevision,
+                baseCloudRevision: syncedProject.baseCloudRevision,
+                versionHistory: syncedProject.versionHistory,
+                _hasLocalUnsyncedSave: false,
+              };
+            })
+          );
+
+          const latestInMem =
+            projectsRef.current.find((p) => p.id === syncedProject.id) || syncedProject;
+          const stillDirty = isProjectDirtyAgainstBaseline(latestInMem, syncedProject);
+          setActiveConflict(null);
+          setHasUnsavedChanges(stillDirty);
+          hasUnsavedChangesRef.current = stillDirty;
+          setSaveStatus(stillDirty ? 'unsaved' : 'saved_cloud');
+
+          if (!options?.silentToast) {
+            toast.success(
+              'Saved to cloud',
+              `"${syncedProject.title || 'Untitled'}" synced (Revision ${cloudResult.cloudRevision}).`
+            );
+          }
+          return true;
+        }
+
+        if (cloudResult.status === 'conflict') {
+          setActiveConflict(cloudResult.conflict);
+          setIsConflictModalOpen(true);
+          setHasUnsavedChanges(true);
+          hasUnsavedChangesRef.current = true;
+          setSaveStatus('conflict');
+          toast.warning(
+            'Conflict — changes need review',
+            'A newer cloud version was detected. Review the differences before saving.'
+          );
+          return false;
+        }
+
+        // Cloud error: saved locally, but cloud write failed -> keep dirty/error state
+        setHasUnsavedChanges(true);
+        hasUnsavedChangesRef.current = true;
+        setSaveStatus('cloud_error');
+        toast.error(
+          'Cloud save failed',
+          cloudResult.status === 'cloud_error'
+            ? cloudResult.errorMessage
+            : 'Saved locally, but cloud sync failed.'
+        );
+        return false;
+      } catch (err) {
+        console.error('Manual save error:', err);
+        setSaveStatus('cloud_error');
+        toast.error('Save failed', 'Could not complete save operation.');
+        return false;
+      } finally {
+        isSavingInFlightRef.current = false;
+      }
+    },
+    [activeProject]
+  );
+
   const handleManualSave = useCallback(() => {
-    if (!activeProject) return;
-    if (autosaveTimeoutRef.current) {
-      clearTimeout(autosaveTimeoutRef.current);
-      autosaveTimeoutRef.current = null;
-    }
-    setSaveStatus('saving');
-    try {
-      storage.saveProject(activeProject);
-      setSaveStatus('saved');
-      toast.success('Document saved', `"${activeProject.title || 'Untitled'}" saved successfully.`);
-    } catch (err) {
-      console.error('Manual save error:', err);
-      setSaveStatus('error');
-      toast.error('Save failed', 'Local storage save failed. Check available browser storage.');
-    }
-  }, [activeProject]);
+    void performProjectSave();
+  }, [performProjectSave]);
 
-  // Retry save
   const handleRetrySave = useCallback(() => {
-    if (!activeProject) return;
-    handleManualSave();
-  }, [activeProject, handleManualSave]);
+    void performProjectSave();
+  }, [performProjectSave]);
 
-  // Flush pending unsaved edits on pagehide/beforeunload
+  // Requirement 3: Browser tab close / refresh warning only when unsaved changes exist
   useEffect(() => {
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
-      let flushFailed = false;
-      try {
-        storage.flushPendingProjects();
-      } catch (err) {
-        flushFailed = true;
-        console.warn('Could not flush pending projects on unload:', err);
-      }
-      if (flushFailed || saveStatus === 'error') {
+      if (hasUnsavedChangesRef.current) {
         e.preventDefault();
-        e.returnValue = 'You have unsaved changes in your document. Are you sure you want to leave?';
+        e.returnValue =
+          'You have unsaved changes in your document. Are you sure you want to leave?';
         return e.returnValue;
       }
     };
-    const handlePageHide = () => {
-      try {
-        storage.flushPendingProjects();
-      } catch (err) {
-        console.warn('Could not flush pending projects on pagehide:', err);
-      }
-    };
     window.addEventListener('beforeunload', handleBeforeUnload);
-    window.addEventListener('pagehide', handlePageHide);
     return () => {
       window.removeEventListener('beforeunload', handleBeforeUnload);
-      window.removeEventListener('pagehide', handlePageHide);
     };
-  }, [saveStatus]);
+  }, []);
 
   // Global Keyboard Shortcuts (Phase 10, Part D)
   useEffect(() => {
@@ -279,79 +636,269 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [handleManualSave, currentView, isFindOpen, clearHighlights, diffProposal, activePanel]);
 
+  // Requirement 3: Guard internal navigation / project switching when unsaved changes exist
+  const executeWithUnsavedGuard = useCallback(
+    (action: () => void) => {
+      if (currentView === 'workspace' && activeProject && hasUnsavedChangesRef.current) {
+        pendingNavigationActionRef.current = action;
+        setIsUnsavedModalOpen(true);
+        return;
+      }
+      action();
+    },
+    [currentView, activeProject]
+  );
+
+  const handleSaveAndLeave = useCallback(async () => {
+    setIsSavingForNavigation(true);
+    try {
+      const ok = await performProjectSave();
+      if (ok) {
+        setIsUnsavedModalOpen(false);
+        const pending = pendingNavigationActionRef.current;
+        pendingNavigationActionRef.current = null;
+        pending?.();
+      } else {
+        // Save failed or hit conflict -> close unsaved modal so user sees error/conflict modal without losing edits
+        setIsUnsavedModalOpen(false);
+      }
+    } finally {
+      setIsSavingForNavigation(false);
+    }
+  }, [performProjectSave]);
+
+  const handleDiscardAndLeave = useCallback(() => {
+    if (activeProject) {
+      const baseline =
+        savedBaselinesRef.current.get(activeProject.id) ||
+        storage.getProjectById(activeProject.id);
+      if (baseline) {
+        setProjects((prev) => prev.map((p) => (p.id === baseline.id ? baseline : p)));
+      }
+    }
+    setHasUnsavedChanges(false);
+    hasUnsavedChangesRef.current = false;
+    setIsUnsavedModalOpen(false);
+    const pending = pendingNavigationActionRef.current;
+    pendingNavigationActionRef.current = null;
+    pending?.();
+  }, [activeProject]);
+
+  const handleStayOnArticle = useCallback(() => {
+    pendingNavigationActionRef.current = null;
+    setIsUnsavedModalOpen(false);
+  }, []);
+
+  // Conflict Resolution Handlers (Requirement 5)
+  const handleReloadCloudVersion = useCallback(async (conflict: ProjectConflictInfo) => {
+    setIsResolvingConflict(true);
+    try {
+      const { localWorkingProject, remoteProject, remoteRevision } = conflict;
+      const mergedHistory = mergeVersionHistories(
+        localWorkingProject.versionHistory,
+        remoteProject.versionHistory
+      );
+      const backupHistory = createVersionSnapshot(
+        { ...localWorkingProject, versionHistory: mergedHistory },
+        'conflict_backup',
+        {
+          label: 'Local working version (saved before loading cloud version)',
+          actionDescription: 'Preserved local edits when resolving conflict in favor of cloud revision',
+          force: true,
+        }
+      );
+      const finalHistory = mergeVersionHistories(backupHistory, mergedHistory);
+      storage.saveProjectHistorySnapshots(conflict.projectId, finalHistory);
+
+      const adoptedProject: WritingProject = {
+        ...localWorkingProject,
+        ...remoteProject,
+        content: ensureSemanticHtml(remoteProject.content),
+        versionHistory: trimInlineVersionHistory(finalHistory),
+        cloudRevision: remoteRevision,
+        baseCloudRevision: remoteRevision,
+        _hasLocalUnsyncedSave: false,
+        _isSeedProject: false,
+      };
+
+      storage.saveProjectsFromRemote([adoptedProject], { replaceAllReconciled: false });
+      savedBaselinesRef.current.set(adoptedProject.id, adoptedProject);
+      setProjects((prev) => prev.map((p) => (p.id === adoptedProject.id ? adoptedProject : p)));
+
+      syncEngine.clearConflictForProject(conflict.projectId);
+      setActiveConflict(null);
+      setIsConflictModalOpen(false);
+      setHasUnsavedChanges(false);
+      hasUnsavedChangesRef.current = false;
+      setSaveStatus('saved_cloud');
+      toast.success(
+        'Cloud Version Loaded',
+        `Loaded Cloud Revision ${remoteRevision}. Your previous local edits are preserved in Version History.`
+      );
+    } finally {
+      setIsResolvingConflict(false);
+    }
+  }, []);
+
+  const handleSaveLocalAsCopy = useCallback(async (conflict: ProjectConflictInfo) => {
+    setIsResolvingConflict(true);
+    try {
+      const { localWorkingProject, remoteProject, remoteRevision } = conflict;
+      // 1. Restore the original project to the authoritative cloud version
+      const adoptedRemote: WritingProject = {
+        ...remoteProject,
+        content: ensureSemanticHtml(remoteProject.content),
+        cloudRevision: remoteRevision,
+        baseCloudRevision: remoteRevision,
+        _hasLocalUnsyncedSave: false,
+        _isSeedProject: false,
+      };
+      storage.saveProjectsFromRemote([adoptedRemote]);
+      savedBaselinesRef.current.set(adoptedRemote.id, adoptedRemote);
+
+      // 2. Create a separate new project with the local working content
+      const copyTitle = `${localWorkingProject.title || 'Untitled'} (Conflict Copy)`;
+      const createdCopy = storage.createProject(localWorkingProject.type, copyTitle, {
+        ...localWorkingProject,
+        title: copyTitle,
+        cloudRevision: 0,
+        baseCloudRevision: 0,
+      });
+
+      let finalCopy = createdCopy;
+      if (syncEngine.isSignedIn()) {
+        const res = await syncEngine.saveProjectToCloud(
+          createdCopy,
+          createdCopy.versionHistory || []
+        );
+        if (res.status === 'saved_cloud') {
+          finalCopy = res.savedProject;
+        }
+      }
+
+      savedBaselinesRef.current.set(finalCopy.id, finalCopy);
+      syncEngine.clearConflictForProject(conflict.projectId);
+      setActiveConflict(null);
+      setIsConflictModalOpen(false);
+      setProjects(storage.getProjects());
+      setActiveProjectId(finalCopy.id);
+      setHasUnsavedChanges(false);
+      hasUnsavedChangesRef.current = false;
+      setSaveStatus(getCleanBaselineSaveStatus(finalCopy));
+      toast.success('Saved as Separate Copy', `Created "${copyTitle}".`);
+    } finally {
+      setIsResolvingConflict(false);
+    }
+  }, []);
+
+  const handleForceOverwriteCloud = useCallback(
+    async (conflict: ProjectConflictInfo) => {
+      setIsResolvingConflict(true);
+      try {
+        const ok = await performProjectSave({
+          projectOverride: conflict.localWorkingProject,
+          forceOverwrite: true,
+          label: `Overwrote Cloud Revision ${conflict.remoteRevision}`,
+        });
+        if (ok) {
+          setIsConflictModalOpen(false);
+          setActiveConflict(null);
+        }
+      } finally {
+        setIsResolvingConflict(false);
+      }
+    },
+    [performProjectSave]
+  );
+
   // Project Creation
   const handleCreateProject = (type: ProjectType) => {
-    const created = storage.createProject(type);
-    setProjects(storage.getProjects());
-    setActiveProjectId(created.id);
-    setActivePanel(null);
-    setCurrentView('workspace');
-    toast.success('Project Created', `Started new ${type.replace('_', ' ')}.`);
+    executeWithUnsavedGuard(() => {
+      const created = storage.createProject(type);
+      savedBaselinesRef.current.set(created.id, created);
+      setProjects(storage.getProjects());
+      setActiveProjectId(created.id);
+      setActivePanel(null);
+      setHasUnsavedChanges(false);
+      hasUnsavedChangesRef.current = false;
+      setSaveStatus('saved_local');
+      setCurrentView('workspace');
+      toast.success('Project Created', `Started new ${type.replace('_', ' ')}.`);
+    });
   };
 
   // Phase 10.5: Use Generated Editorial Idea -> Creates new Article project
   const handleUseIdea = (idea: EditorialIdea, targetAudience?: string) => {
-    const created = storage.createProject('article', idea.title, {
-      brief: {
-        purpose: idea.whyInteresting,
-        audience: targetAudience || 'Discerning gifters & readers',
-        readerLearns: idea.angle,
-        readerFeels: 'Engaged, thoughtful, and relieved to find recommendations written by an authentic human connoisseur.',
-        readerAction: 'Gain an authentic understanding beyond commercial clichés.',
-        keyPoints: [
-          `Editorial Premise: ${idea.angle}`,
-          `Why It's Engaging: ${idea.whyInteresting}`,
-          idea.searchIntent ? `Search Intent: ${idea.searchIntent}` : 'Focus on recipient psychology and craft nuance',
-        ],
-        thingsToAvoid: [
-          'Generic product listicles',
-          'Superficial keyword repetition',
-          'Vague praise without material detail',
-        ],
-      },
-      articleMeta: {
-        slug: idea.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, ''),
-        seoTitle: `${idea.title} | Science of Gifts`,
-        metaDescription: idea.angle.length > 155 ? `${idea.angle.slice(0, 152)}...` : idea.angle,
-        standfirst: idea.angle,
-        targetKeyword: '',
-        secondaryKeywords: [],
-        audience: targetAudience || 'Discerning gifters & readers',
-        searchIntent: idea.searchIntent || 'Editorial insight & advice',
-      },
-      editorialDevelopment: {
-        originalIdea: idea,
-        angles: [],
-        direction: {
-          briefMentionAngleIds: [],
-          doNotUseAngleIds: [],
-          editorsDirection: '',
+    executeWithUnsavedGuard(() => {
+      const created = storage.createProject('article', idea.title, {
+        brief: {
+          purpose: idea.whyInteresting,
+          audience: targetAudience || 'Discerning gifters & readers',
+          readerLearns: idea.angle,
+          readerFeels: 'Engaged, thoughtful, and relieved to find recommendations written by an authentic human connoisseur.',
+          readerAction: 'Gain an authentic understanding beyond commercial clichés.',
+          keyPoints: [
+            `Editorial Premise: ${idea.angle}`,
+            `Why It's Engaging: ${idea.whyInteresting}`,
+            idea.searchIntent ? `Search Intent: ${idea.searchIntent}` : 'Focus on recipient psychology and craft nuance',
+          ],
+          thingsToAvoid: [
+            'Generic product listicles',
+            'Superficial keyword repetition',
+            'Vague praise without material detail',
+          ],
         },
-        status: 'idea',
-      },
-      lastAIRequest: {
-        id: `ai-req-${Date.now()}`,
-        modelUsed: 'gemini-3.6-flash',
-        modelDisplayName: 'Gemini 3.6 Flash',
-        action: 'idea_generation',
-        actionType: 'idea_generation',
-        timestamp: new Date().toISOString(),
-        status: 'completed',
-      },
-    });
+        articleMeta: {
+          slug: idea.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, ''),
+          seoTitle: `${idea.title} | Science of Gifts`,
+          metaDescription: idea.angle.length > 155 ? `${idea.angle.slice(0, 152)}...` : idea.angle,
+          standfirst: idea.angle,
+          targetKeyword: '',
+          secondaryKeywords: [],
+          audience: targetAudience || 'Discerning gifters & readers',
+          searchIntent: idea.searchIntent || 'Editorial insight & advice',
+        },
+        editorialDevelopment: {
+          originalIdea: idea,
+          angles: [],
+          direction: {
+            briefMentionAngleIds: [],
+            doNotUseAngleIds: [],
+            editorsDirection: '',
+          },
+          status: 'idea',
+        },
+        lastAIRequest: {
+          id: `ai-req-${Date.now()}`,
+          modelUsed: 'gemini-3.6-flash',
+          modelDisplayName: 'Gemini 3.6 Flash',
+          action: 'idea_generation',
+          actionType: 'idea_generation',
+          timestamp: new Date().toISOString(),
+          status: 'completed',
+        },
+      });
 
-    setProjects(storage.getProjects());
-    setActiveProjectId(created.id);
-    setActivePanel('develop');
-    setCurrentView('workspace');
-    toast.success('Article Draft Created', `Loaded "${idea.title}" into Article Studio.`);
+      savedBaselinesRef.current.set(created.id, created);
+      setProjects(storage.getProjects());
+      setActiveProjectId(created.id);
+      setActivePanel('develop');
+      setHasUnsavedChanges(false);
+      hasUnsavedChangesRef.current = false;
+      setSaveStatus('saved_local');
+      setCurrentView('workspace');
+      toast.success('Article Draft Created', `Loaded "${idea.title}" into Article Studio.`);
+    });
   };
 
   // Open existing project
   const handleOpenProject = (id: string) => {
-    setActiveProjectId(id);
-    setActivePanel(null);
-    setCurrentView('workspace');
+    if (id === activeProjectId && currentView === 'workspace') return;
+    executeWithUnsavedGuard(() => {
+      setActiveProjectId(id);
+      setActivePanel(null);
+      setCurrentView('workspace');
+    });
   };
 
   // Delete project
@@ -829,38 +1376,60 @@ export default function App() {
         currentView={currentView}
         activeProject={activeProject}
         saveStatus={saveStatus}
+        hasUnsavedChanges={hasUnsavedChanges}
+        onManualSave={handleManualSave}
         onRetrySave={handleRetrySave}
+        onOpenConflictModal={() => {
+          if (activeConflict) {
+            setIsConflictModalOpen(true);
+          } else if (activeProjectId) {
+            const c = syncEngine.getConflictForProject(activeProjectId);
+            if (c) {
+              setActiveConflict(c);
+              setIsConflictModalOpen(true);
+            }
+          }
+        }}
         activePanel={activePanel}
         onTogglePanel={handleTogglePanel}
         onNavigate={(view, projectType) => {
-          setActivePanel(null);
-          if (view === 'dashboard') {
-            if (projectType) {
-              const existing = projects.find((p) => p.type === projectType);
-              if (existing) {
-                setActiveProjectId(existing.id);
-                setCurrentView('workspace');
-                return;
-              } else {
-                handleCreateProject(projectType);
-                return;
+          executeWithUnsavedGuard(() => {
+            setActivePanel(null);
+            if (view === 'dashboard') {
+              if (projectType) {
+                const existing = projects.find((p) => p.type === projectType);
+                if (existing) {
+                  setActiveProjectId(existing.id);
+                  setCurrentView('workspace');
+                  return;
+                } else {
+                  const created = storage.createProject(projectType);
+                  savedBaselinesRef.current.set(created.id, created);
+                  setProjects(storage.getProjects());
+                  setActiveProjectId(created.id);
+                  setHasUnsavedChanges(false);
+                  hasUnsavedChangesRef.current = false;
+                  setSaveStatus('saved_local');
+                  setCurrentView('workspace');
+                  return;
+                }
               }
+              setCurrentView('dashboard');
+            } else if (view === 'idea_generator') {
+              setCurrentView('idea_generator');
+            } else if (view === 'research') {
+              setActiveResearchStudyId(null);
+              setCurrentView('research');
+            } else if (view === 'style_reference') {
+              setCurrentView('style_reference');
+            } else if (view === 'internal_links') {
+              setCurrentView('internal_links');
+            } else if (view === 'backup') {
+              setCurrentView('backup');
+            } else {
+              setCurrentView('settings');
             }
-            setCurrentView('dashboard');
-          } else if (view === 'idea_generator') {
-            setCurrentView('idea_generator');
-          } else if (view === 'research') {
-            setActiveResearchStudyId(null);
-            setCurrentView('research');
-          } else if (view === 'style_reference') {
-            setCurrentView('style_reference');
-          } else if (view === 'internal_links') {
-            setCurrentView('internal_links');
-          } else if (view === 'backup') {
-            setCurrentView('backup');
-          } else {
-            setCurrentView('settings');
-          }
+          });
         }}
         onCreateProject={handleCreateProject}
       />
@@ -1162,6 +1731,22 @@ export default function App() {
           onClose={handleClosePanel}
           project={activeProject}
           onUpdateProject={handleUpdateActiveProject}
+          onRestoreVersion={async (restoredProject, newSnapshots, restoredVersionNumber) => {
+            setProjects((prev) =>
+              prev.map((p) => (p.id === restoredProject.id ? restoredProject : p))
+            );
+            const ok = await performProjectSave({
+              projectOverride: restoredProject,
+              newSnapshotsOverride: newSnapshots,
+              silentToast: true,
+            });
+            if (ok) {
+              toast.success(
+                'Version Restored',
+                `Restored Version ${restoredVersionNumber} and saved checkpoint.`
+              );
+            }
+          }}
         />
       )}
 
@@ -1172,7 +1757,7 @@ export default function App() {
           onClose={handleClosePanel}
           project={activeProject}
           onUpdateProject={handleUpdateActiveProject}
-          onNavigateToResearchLibrary={() => setCurrentView('research')}
+          onNavigateToResearchLibrary={() => executeWithUnsavedGuard(() => setCurrentView('research'))}
           onOpenCitationStudio={() => setActivePanel('citations')}
         />
       )}
@@ -1185,10 +1770,31 @@ export default function App() {
           project={activeProject}
           onUpdateProject={handleUpdateActiveProject}
           editorRef={editorRef}
-          onNavigateToResearchLibrary={() => setCurrentView('research')}
+          onNavigateToResearchLibrary={() => executeWithUnsavedGuard(() => setCurrentView('research'))}
         />
       )}
       </div>
+
+      {/* Unsaved Work Navigation Protection Modal (Requirement 3) */}
+      <UnsavedChangesModal
+        isOpen={isUnsavedModalOpen}
+        projectTitle={activeProject?.title || 'Untitled Project'}
+        isSaving={isSavingForNavigation}
+        onSaveAndLeave={handleSaveAndLeave}
+        onDiscardAndLeave={handleDiscardAndLeave}
+        onStay={handleStayOnArticle}
+      />
+
+      {/* Cloud Revision Conflict Resolution Modal (Requirement 5) */}
+      <ConflictResolutionModal
+        isOpen={isConflictModalOpen}
+        conflict={activeConflict}
+        isProcessing={isResolvingConflict}
+        onReloadCloudVersion={handleReloadCloudVersion}
+        onSaveLocalAsCopy={handleSaveLocalAsCopy}
+        onForceOverwriteCloud={handleForceOverwriteCloud}
+        onClose={() => setIsConflictModalOpen(false)}
+      />
 
       {/* AI Diff Proposal Review Modal */}
       <DiffReviewModal

@@ -29,6 +29,8 @@ import { ModelId } from '../types/models';
 import { DEFAULT_GLOBAL_MODEL_ID, MODEL_REGISTRY } from './modelRegistry';
 import { SavedEditorialIdea } from '../types/ideaGenerator';
 import { ResearchStudy, ResearchClaim, ResearchFile } from '../types/research';
+import { ProjectVersionSnapshot } from '../types/versionHistory';
+import { mergeVersionHistories, trimInlineVersionHistory } from './versionHistoryService';
 import { indexedDBService, STORES } from './indexedDB';
 import { syncEngine } from './syncEngine';
 
@@ -45,8 +47,10 @@ const STORAGE_KEY_RESEARCH_STUDIES = 'sog_research_studies_v1';
 const STORAGE_KEY_RESEARCH_CLAIMS = 'sog_research_claims_v1';
 const STORAGE_KEY_RESEARCH_FILES = 'sog_research_files_v1';
 const STORAGE_KEY_LAST_BACKUP = 'sog_last_backup_timestamp_v1';
+const STORAGE_KEY_PROJECT_HISTORY = 'sog_project_history_v1';
 
 const storageListeners = new Set<() => void>();
+const nonProjectStorageListeners = new Set<() => void>();
 const pendingLocalProjects = new Map<string, WritingProject>();
 
 function mergeWithTombstones<T extends { id: string; updatedAt?: string; deletedAt?: string; _isDeleted?: boolean }>(
@@ -704,6 +708,8 @@ export const storage = {
           if (!existingIds.has(seed.id)) {
             mapped.push({
               ...seed,
+              _isSeedProject: true,
+              _hasLocalUnsyncedSave: false,
               writingControls: { ...DEFAULT_WRITING_CONTROLS, ...seed.aiSettings },
               aiSettings: { ...DEFAULT_WRITING_CONTROLS, ...seed.aiSettings },
             } as WritingProject);
@@ -738,6 +744,8 @@ export const storage = {
     }
     const seeded: WritingProject[] = SEED_PROJECTS.map((p) => ({
       ...p,
+      _isSeedProject: true,
+      _hasLocalUnsyncedSave: false,
       writingControls: { ...DEFAULT_WRITING_CONTROLS, ...p.aiSettings },
       aiSettings: { ...DEFAULT_WRITING_CONTROLS, ...p.aiSettings },
     }) as WritingProject);
@@ -745,16 +753,29 @@ export const storage = {
     return seeded;
   },
 
+  isDefaultSeedProject(project: WritingProject): boolean {
+    if (project._isSeedProject) return true;
+    const seed = SEED_PROJECTS.find((s) => s.id === project.id);
+    if (!seed) return false;
+    return (
+      !project._hasLocalUnsyncedSave &&
+      !project.cloudRevision &&
+      ensureSemanticHtml(project.content) === ensureSemanticHtml(seed.content) &&
+      project.title === seed.title
+    );
+  },
+
   stagePendingProject(project: WritingProject): void {
     pendingLocalProjects.set(project.id, project);
   },
 
+  clearPendingProject(projectId: string): void {
+    pendingLocalProjects.delete(projectId);
+  },
+
   flushPendingProjects(): void {
-    if (pendingLocalProjects.size === 0) return;
-    const pendingList = Array.from(pendingLocalProjects.values());
-    for (const proj of pendingList) {
-      this.saveProject(proj);
-    }
+    // Manual save architecture: do not automatically flush unsaved in-memory projects on unload.
+    pendingLocalProjects.clear();
   },
 
   getProjects(): WritingProject[] {
@@ -770,7 +791,7 @@ export const storage = {
     indexedDBService.putMany(STORES.PROJECTS, projects).catch((err) => {
       console.warn('Async IndexedDB saveRawProjects error:', err);
     });
-    this.notifyListeners();
+    this.notifyProjectListenersOnly();
   },
 
   saveProjects(projects: WritingProject[]): void {
@@ -788,20 +809,82 @@ export const storage = {
     this.saveRawProjects(Array.from(mergedMap.values()));
   },
 
-  saveProjectsFromRemote(projects: WritingProject[]): void {
+  /**
+   * Authoritatively saves reconciled or snapshot-updated projects from Firestore.
+   * Preserves version history snapshots in dedicated history storage and updates baseCloudRevision.
+   */
+  saveProjectsFromRemote(
+    remoteProjects: WritingProject[],
+    options?: { replaceAllReconciled?: boolean }
+  ): void {
+    if (options?.replaceAllReconciled) {
+      // Used by initial login reconciliation which has already computed the exact merged list
+      for (const proj of remoteProjects) {
+        if (proj.versionHistory && proj.versionHistory.length > 0) {
+          this.saveProjectHistorySnapshots(proj.id, proj.versionHistory);
+        }
+      }
+      this.saveRawProjects(remoteProjects);
+      return;
+    }
+
     const localRaw = this.getRawProjectsIncludingDeleted();
-    const merged = mergeWithTombstones(localRaw, projects);
-    for (const remote of projects) {
-      const pending = pendingLocalProjects.get(remote.id);
-      if (pending) {
-        const pendingTime = new Date(pending.updatedAt || 0).getTime();
-        const remoteTime = new Date(remote.updatedAt || (remote as any).deletedAt || 0).getTime();
-        if (remoteTime > pendingTime) {
-          pendingLocalProjects.delete(remote.id);
+    const localMap = new Map<string, WritingProject>();
+    localRaw.forEach((p) => localMap.set(p.id, p));
+
+    const mergedMap = new Map<string, WritingProject>(localMap);
+
+    for (const remote of remoteProjects) {
+      const local = localMap.get(remote.id);
+      const remoteRev = typeof remote.cloudRevision === 'number' ? remote.cloudRevision : 1;
+
+      if (remote.versionHistory && remote.versionHistory.length > 0) {
+        this.saveProjectHistorySnapshots(remote.id, remote.versionHistory);
+      }
+
+      if (!local) {
+        mergedMap.set(remote.id, {
+          ...remote,
+          content: ensureSemanticHtml(remote.content),
+          cloudRevision: remoteRev,
+          baseCloudRevision: remoteRev,
+          _hasLocalUnsyncedSave: false,
+          _isSeedProject: false,
+        });
+      } else {
+        const localRev = typeof local.cloudRevision === 'number' ? local.cloudRevision : 0;
+        const mergedHistory = trimInlineVersionHistory(
+          mergeVersionHistories(local.versionHistory, remote.versionHistory)
+        );
+
+        // If local has an unsynced save that hasn't been uploaded yet, do not overwrite local storage
+        // unless remote is strictly newer and has no local unsynced save
+        if (local._hasLocalUnsyncedSave && remoteRev > (local.baseCloudRevision ?? 0)) {
+          // Keep local in storage for now; syncEngine will notify App of conflict if needed
+          mergedMap.set(remote.id, {
+            ...local,
+            versionHistory: mergedHistory,
+          });
+        } else if (remoteRev > localRev || !local._hasLocalUnsyncedSave) {
+          const remoteTime = new Date(remote.updatedAt || (remote as any).deletedAt || 0).getTime();
+          const localTime = new Date(local.updatedAt || (local as any).deletedAt || 0).getTime();
+          if (remoteRev >= localRev || remoteTime >= localTime || this.isDefaultSeedProject(local)) {
+            mergedMap.set(remote.id, {
+              ...local,
+              ...remote,
+              content: ensureSemanticHtml(remote.content),
+              versionHistory: mergedHistory,
+              cloudRevision: remoteRev,
+              baseCloudRevision: remoteRev,
+              _hasLocalUnsyncedSave: false,
+              _isSeedProject: false,
+            });
+          }
         }
       }
     }
-    this.saveRawProjects(merged);
+
+    this.saveRawProjects(Array.from(mergedMap.values()));
   },
 
   getProjectById(id: string): WritingProject | undefined {
@@ -809,36 +892,149 @@ export const storage = {
     return list.find((p) => p.id === id);
   },
 
-  saveProject(project: WritingProject): void {
-    const pending = pendingLocalProjects.get(project.id);
-    let targetProject = project;
-    if (pending) {
-      const pendingTime = new Date(pending.updatedAt || 0).getTime();
-      const projectTime = new Date(project.updatedAt || 0).getTime();
-      if (pendingTime > projectTime) {
-        targetProject = pending;
-      } else {
-        pendingLocalProjects.delete(project.id);
-      }
+  saveProject(
+    project: WritingProject,
+    options?: {
+      markUnsynced?: boolean;
+      newSnapshots?: ProjectVersionSnapshot[];
     }
+  ): WritingProject {
+    pendingLocalProjects.delete(project.id);
     const list = this.getRawProjectsIncludingDeleted();
-    const index = list.findIndex((p) => p.id === targetProject.id);
+    const index = list.findIndex((p) => p.id === project.id);
+    const existing = index >= 0 ? list[index] : undefined;
+
     const controls =
-      targetProject.writingControls || targetProject.aiSettings || { ...DEFAULT_WRITING_CONTROLS };
+      project.writingControls || project.aiSettings || { ...DEFAULT_WRITING_CONTROLS };
+
+    const mergedHistory = mergeVersionHistories(
+      existing?.versionHistory,
+      project.versionHistory,
+      options?.newSnapshots
+    );
+
+    if (mergedHistory.length > 0) {
+      this.saveProjectHistorySnapshots(project.id, mergedHistory);
+    }
+
     const updated: WritingProject = {
-      ...targetProject,
+      ...(existing || {}),
+      ...project,
       _isDeleted: false,
-      content: ensureSemanticHtml(targetProject.content),
+      _isSeedProject: false,
+      _hasLocalUnsyncedSave: options?.markUnsynced ?? true,
+      baseCloudRevision:
+        project.baseCloudRevision ?? existing?.baseCloudRevision ?? existing?.cloudRevision ?? 0,
+      cloudRevision: project.cloudRevision ?? existing?.cloudRevision ?? 0,
+      content: ensureSemanticHtml(project.content),
       writingControls: controls,
       aiSettings: controls,
-      updatedAt: targetProject.updatedAt || new Date().toISOString(),
+      versionHistory: trimInlineVersionHistory(mergedHistory),
+      updatedAt: project.updatedAt || new Date().toISOString(),
     };
+
     if (index >= 0) {
       list[index] = updated;
     } else {
       list.unshift(updated);
     }
     this.saveRawProjects(list);
+    return updated;
+  },
+
+  markProjectSyncedWithCloud(
+    projectId: string,
+    cloudRevision: number,
+    userId: string,
+    syncedAt: string
+  ): WritingProject | undefined {
+    const list = this.getRawProjectsIncludingDeleted();
+    const index = list.findIndex((p) => p.id === projectId);
+    if (index < 0) return undefined;
+
+    const updated: WritingProject = {
+      ...list[index],
+      cloudRevision,
+      baseCloudRevision: cloudRevision,
+      lastSyncedAt: syncedAt,
+      lastSyncedUserId: userId,
+      _hasLocalUnsyncedSave: false,
+      _isSeedProject: false,
+    };
+    list[index] = updated;
+    this.saveRawProjects(list);
+    return updated;
+  },
+
+  // ==========================================
+  // INDEPENDENT VERSION HISTORY PERSISTENCE
+  // ==========================================
+  getLocalHistoryMap(): Record<string, ProjectVersionSnapshot[]> {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY_PROJECT_HISTORY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') {
+          return parsed;
+        }
+      }
+    } catch (e) {
+      console.warn('Failed to read local project history cache:', e);
+    }
+    return {};
+  },
+
+  saveProjectHistorySnapshots(projectId: string, snapshots: ProjectVersionSnapshot[]): void {
+    if (!projectId || !Array.isArray(snapshots) || snapshots.length === 0) return;
+    try {
+      const map = this.getLocalHistoryMap();
+      const existing = map[projectId] || [];
+      const merged = mergeVersionHistories(existing, snapshots);
+      map[projectId] = merged;
+      localStorage.setItem(STORAGE_KEY_PROJECT_HISTORY, JSON.stringify(map));
+
+      indexedDBService.putMany(STORES.PROJECT_HISTORY, merged).catch((err) => {
+        console.warn('Async IndexedDB saveProjectHistorySnapshots error:', err);
+      });
+    } catch (e) {
+      console.warn('Failed to persist project history snapshots locally:', e);
+    }
+  },
+
+  getProjectHistorySync(projectId: string): ProjectVersionSnapshot[] {
+    const proj = this.getProjectById(projectId);
+    const map = this.getLocalHistoryMap();
+    return mergeVersionHistories(proj?.versionHistory, map[projectId]);
+  },
+
+  async getProjectHistory(projectId: string): Promise<ProjectVersionSnapshot[]> {
+    const syncList = this.getProjectHistorySync(projectId);
+    let idbList: ProjectVersionSnapshot[] = [];
+    try {
+      const allIdb = await indexedDBService.getAll<ProjectVersionSnapshot>(STORES.PROJECT_HISTORY);
+      idbList = allIdb.filter((s) => s.projectId === projectId);
+    } catch (e) {
+      console.warn('Failed to read history from IndexedDB:', e);
+    }
+
+    let cloudList: ProjectVersionSnapshot[] = [];
+    try {
+      if (
+        typeof syncEngine !== 'undefined' &&
+        syncEngine &&
+        typeof syncEngine.fetchProjectCloudHistory === 'function'
+      ) {
+        cloudList = await syncEngine.fetchProjectCloudHistory(projectId);
+      }
+    } catch (e) {
+      console.warn('Failed to fetch cloud history:', e);
+    }
+
+    const merged = mergeVersionHistories(syncList, idbList, cloudList);
+    if (merged.length > syncList.length) {
+      this.saveProjectHistorySnapshots(projectId, merged);
+    }
+    return merged;
   },
 
   renameProject(id: string, newTitle: string): WritingProject | undefined {
@@ -1675,12 +1871,34 @@ export const storage = {
     return () => storageListeners.delete(callback);
   },
 
+  subscribeNonProjectChanges(callback: () => void): () => void {
+    nonProjectStorageListeners.add(callback);
+    return () => nonProjectStorageListeners.delete(callback);
+  },
+
+  notifyProjectListenersOnly(): void {
+    storageListeners.forEach((fn) => {
+      try {
+        fn();
+      } catch (err) {
+        console.error('Storage listener callback error:', err);
+      }
+    });
+  },
+
   notifyListeners(): void {
     storageListeners.forEach((fn) => {
       try {
         fn();
       } catch (err) {
         console.error('Storage listener callback error:', err);
+      }
+    });
+    nonProjectStorageListeners.forEach((fn) => {
+      try {
+        fn();
+      } catch (err) {
+        console.error('Non-project storage listener callback error:', err);
       }
     });
   },

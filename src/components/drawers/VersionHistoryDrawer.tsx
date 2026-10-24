@@ -4,7 +4,7 @@
  * manual checkpoints, and non-destructive version restoration.
  */
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { WritingProject } from '../../types/project';
 import {
   ProjectVersionSnapshot,
@@ -12,17 +12,17 @@ import {
   VersionDiffResult,
 } from '../../types/versionHistory';
 import {
-  createVersionSnapshot,
   restoreVersionSnapshot,
   computeVersionDiff,
+  mergeVersionHistories,
 } from '../../services/versionHistoryService';
+import { storage } from '../../services/storage';
 import { getModelDefinition } from '../../services/modelRegistry';
 import {
   History,
   X,
   RotateCcw,
   GitCompare,
-  Plus,
   Eye,
   Check,
   AlertCircle,
@@ -42,6 +42,11 @@ interface VersionHistoryDrawerProps {
   onClose: () => void;
   project: WritingProject;
   onUpdateProject: (updatedProject: WritingProject) => void;
+  onRestoreVersion?: (
+    updatedProject: WritingProject,
+    newSnapshots: ProjectVersionSnapshot[],
+    restoredVersionNumber: number
+  ) => void | Promise<void>;
   onRestoreSuccess?: (restoredVersionNumber: number) => void;
 }
 
@@ -50,18 +55,34 @@ export const VersionHistoryDrawer: React.FC<VersionHistoryDrawerProps> = ({
   onClose,
   project,
   onUpdateProject,
+  onRestoreVersion,
   onRestoreSuccess,
 }) => {
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'list' | 'preview' | 'compare'>('list');
-  const [isSavingManual, setIsSavingManual] = useState(false);
-  const [manualLabel, setManualLabel] = useState('');
   const [activeFilter, setActiveFilter] = useState<'all' | 'manual_ai' | 'recent'>('all');
   const [restoreConfirmId, setRestoreConfirmId] = useState<string | null>(null);
+  const [persistedHistory, setPersistedHistory] = useState<ProjectVersionSnapshot[]>([]);
+
+  useEffect(() => {
+    if (!isOpen || !project.id) return;
+    let cancelled = false;
+    // Sync immediate read
+    setPersistedHistory(storage.getProjectHistorySync(project.id));
+    // Async read from IndexedDB + Cloud history subcollection
+    storage.getProjectHistory(project.id).then((list) => {
+      if (!cancelled) {
+        setPersistedHistory(list);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, project.id, project.versionHistory]);
 
   const history = useMemo(() => {
-    return project.versionHistory || [];
-  }, [project.versionHistory]);
+    return mergeVersionHistories(project.versionHistory, persistedHistory);
+  }, [project.versionHistory, persistedHistory]);
 
   const selectedVersion = useMemo(() => {
     if (!selectedVersionId) return history[0] || null;
@@ -81,7 +102,8 @@ export const VersionHistoryDrawer: React.FC<VersionHistoryDrawerProps> = ({
           v.type === 'manual_save' ||
           v.type === 'restored_version' ||
           v.type === 'before_ai_edit' ||
-          v.type === 'after_ai_edit'
+          v.type === 'after_ai_edit' ||
+          v.type === 'conflict_backup'
       );
     }
     if (activeFilter === 'recent') {
@@ -92,36 +114,25 @@ export const VersionHistoryDrawer: React.FC<VersionHistoryDrawerProps> = ({
 
   if (!isOpen) return null;
 
-  // Handle manual checkpoint creation
-  const handleSaveManualCheckpoint = (e: React.FormEvent) => {
-    e.preventDefault();
-    const updatedHistory = createVersionSnapshot(project, 'manual_save', {
-      label: manualLabel.trim() || undefined,
-      force: true,
-    });
-    onUpdateProject({
-      ...project,
-      versionHistory: updatedHistory,
-      updatedAt: new Date().toISOString(),
-    });
-    setManualLabel('');
-    setIsSavingManual(false);
-    if (updatedHistory.length > 0) {
-      setSelectedVersionId(updatedHistory[0].id);
-    }
-  };
-
   // Handle version restoration
-  const handleRestoreVersion = (targetVersionId: string) => {
-    const result = restoreVersionSnapshot(project, targetVersionId);
+  const handleRestoreVersion = async (targetVersionId: string) => {
+    const result = restoreVersionSnapshot(project, targetVersionId, history);
     if (result) {
-      onUpdateProject(result.updatedProject);
       setRestoreConfirmId(null);
       setViewMode('list');
       if (result.updatedProject.versionHistory && result.updatedProject.versionHistory.length > 0) {
         setSelectedVersionId(result.updatedProject.versionHistory[0].id);
       }
-      onRestoreSuccess?.(result.restoredVersion.versionNumber);
+      if (onRestoreVersion) {
+        await onRestoreVersion(
+          result.updatedProject,
+          result.newSnapshots,
+          result.restoredVersion.versionNumber
+        );
+      } else {
+        onUpdateProject(result.updatedProject);
+        onRestoreSuccess?.(result.restoredVersion.versionNumber);
+      }
     }
   };
 
@@ -130,7 +141,7 @@ export const VersionHistoryDrawer: React.FC<VersionHistoryDrawerProps> = ({
       case 'manual_save':
         return (
           <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-100 text-emerald-900 border border-emerald-300/60 inline-flex items-center gap-1">
-            <Bookmark className="w-2.5 h-2.5" /> Manual Save
+            <Bookmark className="w-2.5 h-2.5" /> Saved Version
           </span>
         );
       case 'before_ai_edit':
@@ -161,6 +172,12 @@ export const VersionHistoryDrawer: React.FC<VersionHistoryDrawerProps> = ({
         return (
           <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-teal-100 text-teal-900 border border-teal-300/60 inline-flex items-center gap-1">
             <RotateCcw className="w-2.5 h-2.5" /> Restored
+          </span>
+        );
+      case 'conflict_backup':
+        return (
+          <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-rose-100 text-rose-900 border border-rose-300/60 inline-flex items-center gap-1">
+            <AlertCircle className="w-2.5 h-2.5" /> Conflict Backup
           </span>
         );
       case 'autosave_snapshot':
@@ -200,28 +217,20 @@ export const VersionHistoryDrawer: React.FC<VersionHistoryDrawerProps> = ({
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <h2 className="font-editorial text-lg font-bold text-[#1e232a] truncate">Version History</h2>
-              <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-[#eae4d7] text-[#5c5447] shrink-0">
+              <span
+                data-testid="version-history-count"
+                className="px-2 py-0.5 rounded text-[10px] font-semibold bg-[#eae4d7] text-[#5c5447] shrink-0"
+              >
                 {history.length} {history.length === 1 ? 'version' : 'versions'}
               </span>
             </div>
             <p className="text-xs text-[#6e675c] truncate">
-              Every edit, AI generation, and milestone preserved
+              Created automatically when you save or apply AI edits
             </p>
           </div>
         </div>
 
         <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-          {!isSavingManual && viewMode === 'list' && (
-            <button
-              type="button"
-              onClick={() => setIsSavingManual(true)}
-              className="px-2.5 sm:px-3 py-1.5 rounded-md bg-[#1e232a] text-white text-xs font-semibold hover:bg-[#2e3744] transition-colors inline-flex items-center gap-1 shadow-xs min-h-[36px]"
-            >
-              <Plus className="w-3.5 h-3.5 text-amber-300" />
-              <span className="hidden sm:inline">Save Version</span>
-              <span className="sm:hidden">Save</span>
-            </button>
-          )}
           <button
             type="button"
             onClick={onClose}
@@ -232,43 +241,6 @@ export const VersionHistoryDrawer: React.FC<VersionHistoryDrawerProps> = ({
           </button>
         </div>
       </div>
-
-      {/* Manual Checkpoint Creator Dialog */}
-      {isSavingManual && (
-        <form
-          onSubmit={handleSaveManualCheckpoint}
-          className="p-4 bg-amber-50/70 border-b border-amber-200/80 shrink-0 space-y-2.5 animate-in slide-in-from-top-2 duration-150"
-        >
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-[#1e232a] inline-flex items-center gap-1.5">
-              <Bookmark className="w-3.5 h-3.5 text-amber-800" /> Save Named Version Checkpoint
-            </span>
-            <button
-              type="button"
-              onClick={() => setIsSavingManual(false)}
-              className="text-xs text-[#70685c] hover:text-[#1e232a]"
-            >
-              Cancel
-            </button>
-          </div>
-          <div className="flex gap-2">
-            <input
-              type="text"
-              value={manualLabel}
-              onChange={(e) => setManualLabel(e.target.value)}
-              placeholder="Optional label (e.g. Before final rewrite, Pre-publication pass)"
-              className="flex-1 px-3 py-1.5 rounded bg-white border border-[#ded7ca] text-xs text-[#1e232a] focus:outline-none focus:ring-1 focus:ring-amber-800"
-              autoFocus
-            />
-            <button
-              type="submit"
-              className="px-3 py-1.5 rounded bg-amber-900 text-white text-xs font-semibold hover:bg-amber-950 transition-colors shrink-0 shadow-2xs"
-            >
-              Save Now
-            </button>
-          </div>
-        </form>
-      )}
 
       {/* View Mode: PREVIEW */}
       {viewMode === 'preview' && selectedVersion && (
